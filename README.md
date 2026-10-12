@@ -23,8 +23,6 @@ OpsBrain/
 ├── Dockerfile                 # Image build cho FastAPI app
 ├── README.md                  # Hướng dẫn hạ tầng và vận hành
 ├── docker-compose.yml         # File điều phối container cục bộ
-├── logs/
-│   └── runtime.log            # Nhật ký runtime của dự án (Gate 0)
 ├── migrations/
 │   └── init_pgvector.sql      # Migration kích hoạt extension pgvector
 ├── project very strong.docx   # Tài liệu đặc tả gốc
@@ -38,6 +36,8 @@ OpsBrain/
     ├── __init__.py
     └── test_health.py         # Test suite kiểm thử liveness và readiness
 ```
+
+Runtime log được tạo cục bộ và bị loại khỏi Git để tránh đưa dữ liệu vận hành hoặc thông tin máy cá nhân lên repository.
 
 ---
 

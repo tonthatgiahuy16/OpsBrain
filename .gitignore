@@ -1,0 +1,41 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# Runtime logs
+logs/
+*.log
+
+# Local databases and backups
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.bak
+backups/
+
+# Private or machine-local data
+data/private/
+data/local/
+vault/private/
+.ollama/
+
+# IDE and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
