@@ -1,9 +1,11 @@
 # OpsBrain Minimal API Contract
 
-- **Status:** Proposed
-- **Contract version:** `0.1`
+- **Status:** Accepted
+- **Contract version:** `1.0`
 - **Primary owner:** Backend and Data Engineering
 - **Reviewer:** Corpus and Evaluation
+- **Decision date:** `2026-10-15`
+- **Acceptance basis:** Project owner decision under delegated authority from the reviewer
 - **Target milestones:** Milestone 2 to Milestone 9
 
 ## 1. Purpose
@@ -947,7 +949,7 @@ Capability được backend ánh xạ từ authenticated principal. Client khôn
 
 Contract version `0.1` được chấp nhận khi:
 
-- Hai thành viên review toàn bộ endpoint, request, response và error behavior.
+- Hai thành viên review toàn bộ contract hoặc reviewer ủy quyền rõ ràng cho project owner đưa ra quyết định chấp nhận cuối cùng.
 - Endpoint summary khớp với các section chi tiết.
 - Không còn open decision chưa được ghi rõ.
 - Authentication context, capability và ACL boundary được hai thành viên giải thích thống nhất.
