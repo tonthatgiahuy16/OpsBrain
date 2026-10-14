@@ -33,9 +33,9 @@ Payment requests in the synthetic production environment intermittently failed b
 
 ## Root cause
 
-Deployment version 1.4.0 reduced the maximum application database connection-pool size from 40 connections to 4 connections.
+Deployment version 1.4.0 reduced the SQLAlchemy `pool_size` setting from 40 to 4 while keeping `max_overflow` at 0.
 
-During increased request volume, all available connections were checked out. Additional requests waited for a database connection and eventually returned HTTP 503.
+During increased request volume, all four available connections were checked out. Additional requests waited for a connection and eventually timed out, after which Payment Service returned HTTP 503 in the synthetic scenario.
 
 ## Supporting evidence
 

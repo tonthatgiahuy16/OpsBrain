@@ -9,6 +9,8 @@ owner_team: payments-platform
 provenance_type: synthetic
 access_scope: organization
 criticality: critical
+dependency_refs:
+  - fraud-service
 tags:
   - payment
   - backend
@@ -34,4 +36,4 @@ The service is used as the central component in the sample incident scenario. A 
 
 ## Dependencies
 
-No direct service dependency is defined in the initial sample.
+Payment Service calls Fraud Service before authorizing transactions that require risk evaluation.

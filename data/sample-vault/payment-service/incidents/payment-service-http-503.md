@@ -37,19 +37,19 @@ Payment requests intermittently failed for 31 minutes. No real customer or produ
 - `09:10` — The incident was acknowledged and investigation began.
 - `09:18` — Engineers identified elevated database connection wait time.
 - `09:25` — The connection-pool configuration was identified as the leading hypothesis.
-- `09:30` — The previous connection-pool limit was restored.
+- `09:30` — The previous reviewed `pool_size` setting was restored.
 - `09:38` — HTTP 503 responses returned to the normal synthetic baseline.
 
 ## Evidence
 
 - HTTP 503 responses increased after deployment version 1.4.0.
 - Database connection wait time increased during the same interval.
-- The configured maximum connection-pool size had changed from 40 to 4.
-- Error rates decreased after the previous pool limit was restored.
+- The deployed SQLAlchemy settings changed `pool_size` from 40 to 4 while `max_overflow` remained 0.
+- Error rates decreased after the previous reviewed `pool_size` setting was restored.
 
 ## Mitigation
 
-The connection-pool limit was restored to 40 and the Payment Service instances were restarted in a controlled sequence.
+The `pool_size` setting was restored to 40 and the Payment Service instances were restarted in a controlled sequence.
 
 ## Related documents
 

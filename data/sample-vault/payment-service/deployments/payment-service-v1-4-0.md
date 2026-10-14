@@ -37,7 +37,9 @@ Several minutes after deployment, the service began returning HTTP 503 responses
 
 ## Suspected change
 
-The maximum database connection-pool size was reduced from 40 connections to 4 connections. This change may have caused connection exhaustion under load.
+The SQLAlchemy `pool_size` setting was reduced from 40 to 4 while `max_overflow` remained 0.
+
+With overflow disabled, the application pool allowed at most four simultaneous checked-out connections per application instance. This change may have caused connection exhaustion under load.
 
 ## Rollback information
 
