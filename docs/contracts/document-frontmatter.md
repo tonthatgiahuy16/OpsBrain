@@ -1,15 +1,16 @@
 # OpsBrain Document Frontmatter Contract
 
-- **Status:** Proposal
-- **Contract version:** `0.1`
+- **Status:** Accepted for Milestone 2
+- **Contract version:** `1.0`
 - **Primary owner:** Backend and Data Engineering
 - **Reviewer:** Corpus and Evaluation
+- **Decision date:** `2026-10-14`
 
 ## 1. Purpose
 
 Contract này quy định metadata mà OpsBrain chấp nhận từ frontmatter của tài liệu Markdown. Mục tiêu là giúp sample vault, validator, PostgreSQL schema và ingestion pipeline sử dụng cùng một cấu trúc dữ liệu.
 
-Đây là proposal để hai thành viên review. Chưa được xem là contract chính thức cho đến khi các open decision được chốt.
+Đây là contract baseline đã được hai thành viên chấp nhận cho Milestone 2. Sample vault, validator, database schema và ingestion pipeline phải tuân theo contract này. Mọi thay đổi semantic sau đó phải được review qua Pull Request và ghi nhận bằng contract version mới.
 
 ## 2. Scope
 
@@ -58,6 +59,8 @@ Contract quy định:
 | `allowed_users` | list of strings | Conditional | Stable principal IDs | User được phép đọc |
 | `allowed_teams` | list of strings | Conditional | Stable team IDs | Team được phép đọc |
 | `allowed_roles` | list of strings | Conditional | Stable role IDs | Role được phép đọc |
+| `effective_from` | datetime string | No | RFC 3339 và có timezone | Thời điểm tài liệu bắt đầu đủ điều kiện có hiệu lực |
+| `effective_until` | datetime string | No | RFC 3339 và có timezone; phải sau `effective_from` nếu cả hai cùng tồn tại | Thời điểm tài liệu hết hiệu lực |
 | `tags` | list of strings | No | Lowercase, không trùng | Nhãn hỗ trợ tổ chức nội dung |
 
 ## 5. Type-specific fields
@@ -122,8 +125,12 @@ Các bước thực hiện, điều kiện dừng và rollback được viết t
 - Reference phải dùng stable `document_id`.
 - Document được tham chiếu phải đúng loại yêu cầu của field.
 - Reference trùng trong cùng một danh sách không hợp lệ.
-- Self-reference không hợp lệ, trừ khi một contract phiên bản sau cho phép rõ ràng.
-- Hành vi đối với reference chưa tồn tại vẫn tuân theo broken relationship policy cần được hai thành viên chốt.
+- Self-reference không hợp lệ, trừ khi một contract version sau cho phép rõ ràng.
+- Ingestion phải thu thập identity của toàn bộ document trong batch trước khi resolve relationship.
+- Broken reference trong field bắt buộc làm document không hợp lệ; không được tạo active version hoặc derived record.
+- Các field quan hệ bắt buộc gồm `deployment.service_refs`, `incident.affected_service_refs`, `postmortem.incident_refs`, `runbook.service_refs` và `alert.service_refs`.
+- Broken reference trong field tùy chọn tạo warning trong ingestion job; document có thể tiếp tục ingest nhưng không được tạo dangling edge.
+- Các field quan hệ tùy chọn gồm `service.dependency_refs` và `postmortem.contributing_service_refs`.
 
 ## 6. Identity rules
 
@@ -141,6 +148,11 @@ Các bước thực hiện, điều kiện dừng và rollback được viết t
 - Backend phải lưu audit event khi review state thay đổi.
 - `document_status`, `review_state` và các field ACL trong frontmatter chỉ là trạng thái được yêu cầu từ nguồn; backend phải kiểm tra transition và quyền của principal trước khi chấp nhận.
 - Người có quyền sửa file không mặc nhiên có quyền approve, revoke hoặc thay đổi ACL.
+- Transition sang `approved` chỉ hợp lệ từ `in_review`.
+- Principal thực hiện approval phải có capability `document:approve`.
+- Reviewer approve phải khác principal đã submit hoặc sửa nội dung của version hiện tại.
+- Nếu backend không truy vết được actor identity thì không được chấp nhận transition sang `approved`.
+- Capability được ánh xạ từ role trong backend; frontmatter không được tự khai báo capability.
 
 ## 8. ACL rules
 
@@ -155,8 +167,39 @@ Các bước thực hiện, điều kiện dừng và rollback được viết t
 - Với `access_scope: restricted`, principal được phép truy cập khi có ít nhất một exact match giữa user ID, team ID hoặc role ID đáng tin cậy của request với danh sách tương ứng.
 - Baseline không hỗ trợ wildcard, anonymous principal hoặc so khớp gần đúng đối với ACL.
 - Thay đổi `access_scope` hoặc các danh sách `allowed_*` phải tạo audit event và làm mất hiệu lực cache hoặc dữ liệu dẫn xuất có liên quan trước lần retrieval tiếp theo.
+- Baseline chỉ hỗ trợ `organization` và `restricted`; không hỗ trợ `public` hoặc anonymous access.
+- `access_scope` là field bắt buộc và không có default. Thiếu field này làm document không hợp lệ.
 
-## 9. System-derived metadata
+## 9. Provenance rules
+
+- Mọi document phải có source path hoặc source URI do connector quan sát và backend lưu lại.
+- Khi `provenance_type: external`, `source_refs` bắt buộc phải có ít nhất một identifier hoặc URL truy vết được.
+- Khi `provenance_type: internal`, `source_refs` là tùy chọn nếu source path hoặc source URI của note đã đủ làm provenance.
+- Tài liệu internal dựa trên ticket, log hoặc evidence ngoài note phải khai báo các nguồn đó trong `source_refs`.
+- Khi `provenance_type: synthetic`, `source_refs` là tùy chọn nhưng tài liệu phải giữ nhãn synthetic và trải qua independent human review trước khi được `approved`.
+- `source_refs` không được chứa secret, credential hoặc raw restricted content.
+
+## 10. Versioning and idempotency rules
+
+- Thay đổi semantic trong Markdown body hoặc author-controlled frontmatter phải tạo document version mới.
+- Thay đổi lifecycle, review state hoặc ACL là semantic frontmatter change, vì vậy phải tạo document version và audit event; thay đổi ACL còn phải vô hiệu hóa cache và trạng thái truy cập dẫn xuất liên quan.
+- Thứ tự YAML key, biểu diễn YAML tương đương và thay đổi line ending không tạo version mới sau canonicalization.
+- Thay đổi system-derived metadata như ingestion timestamp không tạo document version mới.
+- Content hash được tính từ canonicalized author-controlled frontmatter và normalized Markdown body; system-derived metadata không được đưa vào hash.
+- Replay cùng stable identity và cùng content hash không được tạo active version, chunk hoặc relationship trùng.
+
+## 11. Temporal validity rules
+
+- `effective_from` và `effective_until` là optional.
+- Nếu cả hai cùng tồn tại thì `effective_until` phải sau `effective_from`.
+- Backend sử dụng thời gian có timezone và so sánh theo UTC.
+- Tại thời điểm request `t`, document đủ điều kiện thời gian khi `effective_from` không tồn tại hoặc `t >= effective_from`, đồng thời `effective_until` không tồn tại hoặc `t < effective_until`.
+- Không có `effective_from` nghĩa là không giới hạn thời điểm bắt đầu.
+- Không có `effective_until` nghĩa là không có thời điểm hết hiệu lực được khai báo.
+- `deprecated`, `revoked` hoặc review state khác `approved` luôn làm document không đủ điều kiện retrieval, bất kể khoảng thời gian.
+- Document ngoài khoảng hiệu lực vẫn được giữ trong version history và audit.
+
+## 12. System-derived metadata
 
 Các giá trị sau do backend tạo và không yêu cầu người viết nhập trong frontmatter:
 
@@ -170,23 +213,12 @@ Các giá trị sau do backend tạo và không yêu cầu người viết nhậ
 - Database primary key.
 - Retrieval score và strategy.
 
-## 10. Invalid document behavior
+## 13. Invalid document behavior
 
 - Thiếu field bắt buộc: từ chối document và trả lỗi chỉ rõ field.
 - Sai kiểu dữ liệu hoặc enum: từ chối document.
 - `document_id` trùng trong cùng batch: từ chối các record xung đột.
-- Quan hệ tới document không tồn tại: xử lý theo relationship policy chưa được chốt.
+- Broken relationship phải được xử lý theo mục 5.7; không được tạo dangling edge hoặc tự bỏ qua lỗi của field bắt buộc.
 - ACL không hợp lệ: fail closed.
 - Validation thất bại không được tạo active version, chunk, embedding hoặc relationship.
 - Lỗi phải được ghi vào ingestion job và audit mà không đưa nội dung trái quyền vào log.
-
-## 11. Open decisions
-
-Hai thành viên cần chốt:
-
-1. Có cần cho phép `access_scope: organization` trong baseline hay chỉ dùng restricted access?
-2. Ai có quyền chuyển `review_state` thành `approved`?
-3. `source_refs` bắt buộc với loại provenance nào?
-4. Broken relationship sẽ làm ingestion fail hay chỉ tạo warning?
-5. Metadata change có luôn tạo document version mới không?
-6. Có cần thêm `effective_from` và `effective_until` cho tài liệu hết hiệu lực?
