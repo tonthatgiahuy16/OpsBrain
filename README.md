@@ -25,7 +25,10 @@ OpsBrain/
 ├── docker-compose.yml         # File điều phối container cục bộ
 ├── migrations/
 │   └── init_pgvector.sql      # Migration kích hoạt extension pgvector
-├── project very strong.docx   # Tài liệu đặc tả gốc
+├── docs/
+│   ├── contracts/
+│   │   └── document-frontmatter.md  # Hợp đồng frontmatter
+│   └── project-specification.md     # Đặc tả dự án công khai
 ├── requirements.txt           # Danh mục dependencies Python
 ├── src/
 │   ├── __init__.py
