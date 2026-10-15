@@ -1,7 +1,7 @@
 # OpsBrain Storage Schema Contract
 
-- **Status:** Proposed
-- **Contract version:** `0.1`
+- **Status:** Accepted
+- **Contract version:** `1.0`
 - **Primary owner:** Backend and Data Engineering
 - **Reviewer:** Corpus and Evaluation
 - **Target milestone:** Milestone 3
