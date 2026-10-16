@@ -3,9 +3,8 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from src.database import engine
 from src.ingestion.canonicalization import canonical_content_hash
 from src.ingestion.frontmatter import validate_markdown_document
 from src.ingestion.lifecycle import ingest_validated_document
@@ -79,7 +78,9 @@ def test_semantic_body_change_has_different_hash():
 
 
 @pytest.mark.asyncio
-async def test_create_then_unchanged_replay_persists_one_version():
+async def test_create_then_unchanged_replay_persists_one_version(
+    database_engine: AsyncEngine,
+):
     markdown = SAMPLE_DOCUMENT.read_text(encoding="utf-8")
     validated_document = validate_markdown_document(
         markdown,
@@ -89,7 +90,7 @@ async def test_create_then_unchanged_replay_persists_one_version():
     organization_id = uuid4()
     principal_id = uuid4()
 
-    async with engine.connect() as connection:
+    async with database_engine.connect() as connection:
         transaction = await connection.begin()
         session = AsyncSession(
             bind=connection,
