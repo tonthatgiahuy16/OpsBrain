@@ -16,7 +16,7 @@ from src.models.storage import Document, DocumentVersion
 
 @dataclass(frozen=True)
 class IngestionResult:
-    outcome: Literal["created", "unchanged"]
+    outcome: Literal["created", "updated", "unchanged"]
     document_pk: UUID
     document_version_id: UUID
     version_number: int
@@ -86,8 +86,80 @@ async def ingest_validated_document(
                 content_hash=current_version.content_hash,
             )
 
-        raise NotImplementedError(
-            "semantic document update is outside this vertical slice"
+        accepted_frontmatter = frontmatter.model_copy(
+            update={"review_state": "in_review"},
+        )
+        accepted_document = ValidatedMarkdownDocument(
+            source_uri=document.source_uri,
+            frontmatter=accepted_frontmatter,
+            body=document.body,
+        )
+        accepted_content_hash = canonical_content_hash(
+            accepted_document
+        )
+
+        if accepted_content_hash == current_version.content_hash:
+            return IngestionResult(
+                outcome="unchanged",
+                document_pk=stored_document.id,
+                document_version_id=current_version.id,
+                version_number=current_version.version_number,
+                content_hash=current_version.content_hash,
+            )
+
+        change_kind = (
+            "content_update"
+            if accepted_document.body
+            != current_version.markdown_body
+            else "metadata_update"
+        )
+
+        version_id = uuid4()
+        version_number = current_version.version_number + 1
+
+        updated_version = DocumentVersion(
+            id=version_id,
+            organization_id=organization_id,
+            document_pk=stored_document.id,
+            parent_version_id=current_version.id,
+            version_number=version_number,
+            schema_version=accepted_frontmatter.schema_version,
+            canonicalization_version=CANONICALIZATION_VERSION,
+            hash_algorithm=HASH_ALGORITHM,
+            content_hash=accepted_content_hash,
+            title=accepted_frontmatter.title,
+            owner_team=accepted_frontmatter.owner_team,
+            source_uri=accepted_document.source_uri,
+            source_refs=list(accepted_frontmatter.source_refs),
+            tags=list(accepted_frontmatter.tags),
+            markdown_body=accepted_document.body,
+            frontmatter_snapshot=(
+                accepted_frontmatter.model_dump(mode="json")
+            ),
+            document_status=accepted_frontmatter.document_status,
+            review_state=accepted_frontmatter.review_state,
+            provenance_type=accepted_frontmatter.provenance_type,
+            access_scope=accepted_frontmatter.access_scope,
+            effective_from=accepted_frontmatter.effective_from,
+            effective_until=accepted_frontmatter.effective_until,
+            change_kind=change_kind,
+            created_by_principal_id=actor_principal_id,
+        )
+        session.add(updated_version)
+        await session.flush()
+
+        stored_document.current_source_uri = (
+            accepted_document.source_uri
+        )
+        stored_document.current_version_id = version_id
+        await session.flush()
+
+        return IngestionResult(
+            outcome="updated",
+            document_pk=stored_document.id,
+            document_version_id=version_id,
+            version_number=version_number,
+            content_hash=accepted_content_hash,
         )
 
     document_pk = uuid4()
