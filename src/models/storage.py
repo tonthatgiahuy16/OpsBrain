@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     text,
+    Boolean,
     Integer,
     func,
 )
@@ -97,6 +98,340 @@ class Principal(Base):
         CheckConstraint(
             "status IN ('active', 'disabled')",
             name="status_allowed",
+        ),
+    )
+
+
+class IngestionJob(Base):
+    __tablename__ = "ingestion_jobs"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    request_id = Column(Text, nullable=False)
+    idempotency_key_hash = Column(Text, nullable=False)
+    request_payload_hash = Column(Text, nullable=False)
+    submitted_by_principal_id = Column(
+        PGUUID(as_uuid=True),
+        nullable=False,
+    )
+    status = Column(Text, nullable=False)
+    submitted_document_count = Column(Integer, nullable=False)
+    job_error_code = Column(Text, nullable=True)
+    job_error_message = Column(Text, nullable=True)
+    submitted_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "submitted_by_principal_id",
+            "idempotency_key_hash",
+        ),
+        UniqueConstraint("organization_id", "id"),
+        ForeignKeyConstraint(
+            [
+                "organization_id",
+                "submitted_by_principal_id",
+            ],
+            [
+                "principals.organization_id",
+                "principals.id",
+            ],
+            name="fk_ingestion_jobs_submitted_by_principal",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_ingestion_jobs_org_principal_submitted_at",
+            "organization_id",
+            "submitted_by_principal_id",
+            "submitted_at",
+        ),
+        Index(
+            "ix_ingestion_jobs_status_submitted_at",
+            "status",
+            "submitted_at",
+        ),
+
+        CheckConstraint(
+            "btrim(request_id) <> ''",
+            name="request_id_not_blank",
+        ),
+        CheckConstraint(
+            "idempotency_key_hash ~ '^[0-9a-f]{64}$'",
+            name="idempotency_key_hash_sha256_hex",
+        ),
+        CheckConstraint(
+            "request_payload_hash ~ '^[0-9a-f]{64}$'",
+            name="request_payload_hash_sha256_hex",
+        ),
+        CheckConstraint(
+            (
+                "status IN "
+                "('queued', 'running', 'completed', "
+                "'completed_with_errors', 'failed')"
+            ),
+            name="status_allowed",
+        ),
+        CheckConstraint(
+            "submitted_document_count > 0",
+            name="submitted_document_count_positive",
+        ),
+        CheckConstraint(
+            (
+                "(status = 'queued' "
+                "AND started_at IS NULL "
+                "AND completed_at IS NULL) "
+                "OR "
+                "(status = 'running' "
+                "AND started_at IS NOT NULL "
+                "AND completed_at IS NULL) "
+                "OR "
+                "(status IN ('completed', 'completed_with_errors', 'failed') "
+                "AND started_at IS NOT NULL "
+                "AND completed_at IS NOT NULL)"
+            ),
+            name="status_timestamps_consistent",
+        ),
+        CheckConstraint(
+            (
+                "completed_at IS NULL "
+                "OR started_at IS NULL "
+                "OR completed_at >= started_at"
+            ),
+            name="completion_not_before_start",
+        ),
+    )
+
+
+class IngestionJobItem(Base):
+    __tablename__ = "ingestion_job_items"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    ingestion_job_id = Column(PGUUID(as_uuid=True), nullable=False)
+    item_index = Column(Integer, nullable=False)
+    source_uri = Column(Text, nullable=False)
+    submitted_markdown = Column(Text, nullable=True)
+    submitted_content_hash = Column(Text, nullable=False)
+    document_id = Column(Text, nullable=True)
+    document_pk = Column(PGUUID(as_uuid=True), nullable=True)
+    document_version_id = Column(PGUUID(as_uuid=True), nullable=True)
+    processing_status = Column(Text, nullable=False)
+    outcome = Column(Text, nullable=True)
+    warnings = Column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    )
+    errors = Column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "ingestion_job_id",
+            "item_index",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "ingestion_job_id"],
+            [
+                "ingestion_jobs.organization_id",
+                "ingestion_jobs.id",
+            ],
+            name="fk_ingestion_job_items_job",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "document_pk"],
+            [
+                "documents.organization_id",
+                "documents.id",
+            ],
+            name="fk_ingestion_job_items_document",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "organization_id",
+                "document_pk",
+                "document_version_id",
+            ],
+            [
+                "document_versions.organization_id",
+                "document_versions.document_pk",
+                "document_versions.id",
+            ],
+            name="fk_ingestion_job_items_document_version",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "item_index >= 0",
+            name="item_index_non_negative",
+        ),
+        CheckConstraint(
+            "btrim(source_uri) <> ''",
+            name="source_uri_not_blank",
+        ),
+        CheckConstraint(
+            "submitted_content_hash ~ '^[0-9a-f]{64}$'",
+            name="submitted_content_hash_sha256_hex",
+        ),
+        CheckConstraint(
+            (
+                "processing_status IN "
+                "('queued', 'running', 'succeeded', 'failed')"
+            ),
+            name="processing_status_allowed",
+        ),
+        CheckConstraint(
+            (
+                "outcome IS NULL OR outcome IN "
+                "('created', 'updated', 'unchanged', 'failed')"
+            ),
+            name="outcome_allowed",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(warnings) = 'array'",
+            name="warnings_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(errors) = 'array'",
+            name="errors_array",
+        ),
+        CheckConstraint(
+            (
+                "document_version_id IS NULL "
+                "OR document_pk IS NOT NULL"
+            ),
+            name="document_version_requires_document",
+        ),
+        CheckConstraint(
+            (
+                "(processing_status IN ('queued', 'running') "
+                "AND outcome IS NULL "
+                "AND completed_at IS NULL) "
+                "OR "
+                "(processing_status = 'succeeded' "
+                "AND outcome IN ('created', 'updated', 'unchanged') "
+                "AND completed_at IS NOT NULL) "
+                "OR "
+                "(processing_status = 'failed' "
+                "AND outcome = 'failed' "
+                "AND completed_at IS NOT NULL "
+                "AND jsonb_array_length(errors) > 0)"
+            ),
+            name="processing_state_consistent",
+        ),
+    )
+
+
+class IngestionJobAttempt(Base):
+    __tablename__ = "ingestion_job_attempts"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    ingestion_job_id = Column(PGUUID(as_uuid=True), nullable=False)
+    attempt_number = Column(Integer, nullable=False)
+    status = Column(Text, nullable=False)
+    retryable = Column(Boolean, nullable=False)
+    error_code = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    started_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "ingestion_job_id",
+            "attempt_number",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "ingestion_job_id"],
+            [
+                "ingestion_jobs.organization_id",
+                "ingestion_jobs.id",
+            ],
+            name="fk_ingestion_job_attempts_job",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "attempt_number > 0",
+            name="attempt_number_positive",
+        ),
+        CheckConstraint(
+            "status IN ('running', 'succeeded', 'failed')",
+            name="status_allowed",
+        ),
+        CheckConstraint(
+            "error_code IS NULL OR btrim(error_code) <> ''",
+            name="error_code_not_blank_when_present",
+        ),
+        CheckConstraint(
+            "error_message IS NULL OR btrim(error_message) <> ''",
+            name="error_message_not_blank_when_present",
+        ),
+        CheckConstraint(
+            (
+                "(status = 'running' "
+                "AND completed_at IS NULL "
+                "AND error_code IS NULL "
+                "AND error_message IS NULL) "
+                "OR "
+                "(status = 'succeeded' "
+                "AND completed_at IS NOT NULL "
+                "AND retryable = false "
+                "AND error_code IS NULL "
+                "AND error_message IS NULL) "
+                "OR "
+                "(status = 'failed' "
+                "AND completed_at IS NOT NULL "
+                "AND error_code IS NOT NULL)"
+            ),
+            name="attempt_state_consistent",
+        ),
+        CheckConstraint(
+            "completed_at IS NULL OR completed_at >= started_at",
+            name="completion_not_before_start",
         ),
     )
 
