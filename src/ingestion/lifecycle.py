@@ -106,13 +106,18 @@ async def ingest_validated_document(
 
         if current_version.content_hash == content_hash:
 
+            event_type = "ingestion.item.unchanged"
+            if stored_document.current_source_uri != document.source_uri:
+                stored_document.current_source_uri = document.source_uri
+                event_type = "document.source_moved"
+
             await _append_ingestion_audit_event(
                 session,
                 organization_id=organization_id,
                 actor_principal_id=actor_principal_id,
                 document_pk=stored_document.id,
                 document_version_id=current_version.id,
-                event_type="ingestion.item.unchanged",
+                event_type=event_type,
             )
 
             return IngestionResult(
