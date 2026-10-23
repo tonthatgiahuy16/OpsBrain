@@ -50,6 +50,88 @@ async def _append_ingestion_audit_event(
     await session.flush()
 
 
+async def delete_document(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    actor_principal_id: UUID,
+    document_id: str,
+) -> None:
+    stored_document = await session.scalar(
+        select(Document)
+        .where(
+            Document.organization_id == organization_id,
+            Document.document_id == document_id,
+        )
+        .with_for_update()
+    )
+
+    if stored_document is None:
+        raise ValueError("document not found")
+
+    if stored_document.record_state == "deleted":
+        return
+
+    current_version = await session.scalar(
+        select(DocumentVersion).where(
+            DocumentVersion.organization_id == organization_id,
+            DocumentVersion.document_pk == stored_document.id,
+            DocumentVersion.id == stored_document.current_version_id,
+        )
+    )
+
+    if current_version is None:
+        raise RuntimeError(
+            "current document version could not be resolved"
+        )
+
+    tombstone_id = uuid4()
+    tombstone = DocumentVersion(
+        id=tombstone_id,
+        organization_id=organization_id,
+        document_pk=stored_document.id,
+        parent_version_id=current_version.id,
+        version_number=current_version.version_number + 1,
+        schema_version=current_version.schema_version,
+        canonicalization_version=(
+            current_version.canonicalization_version
+        ),
+        hash_algorithm=current_version.hash_algorithm,
+        content_hash=current_version.content_hash,
+        title=current_version.title,
+        owner_team=current_version.owner_team,
+        source_uri=stored_document.current_source_uri,
+        source_refs=list(current_version.source_refs),
+        tags=list(current_version.tags),
+        markdown_body=current_version.markdown_body,
+        frontmatter_snapshot=current_version.frontmatter_snapshot,
+        document_status="revoked",
+        review_state=current_version.review_state,
+        provenance_type=current_version.provenance_type,
+        access_scope=current_version.access_scope,
+        effective_from=current_version.effective_from,
+        effective_until=current_version.effective_until,
+        change_kind="delete",
+        created_by_principal_id=actor_principal_id,
+    )
+    session.add(tombstone)
+    await session.flush()
+
+    stored_document.record_state = "deleted"
+    stored_document.deleted_at = datetime.now(timezone.utc)
+    stored_document.deleted_by_principal_id = actor_principal_id
+    stored_document.current_version_id = tombstone_id
+
+    await _append_ingestion_audit_event(
+        session,
+        organization_id=organization_id,
+        actor_principal_id=actor_principal_id,
+        document_pk=stored_document.id,
+        document_version_id=tombstone_id,
+        event_type="document.deleted",
+    )
+
+
 async def ingest_validated_document(
     session: AsyncSession,
     *,
