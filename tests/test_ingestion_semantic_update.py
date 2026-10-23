@@ -2,7 +2,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -13,6 +13,7 @@ from src.models.storage import (
     DocumentVersion,
     Organization,
     Principal,
+    AuditEvent,
 )
 
 
@@ -109,6 +110,25 @@ async def test_body_update_creates_version_two_and_preserves_history(
                     .order_by(DocumentVersion.version_number)
                 )
             ).all()
+
+            update_events = (
+                await session.scalars(
+                    select(AuditEvent).where(
+                        AuditEvent.organization_id == organization_id,
+                        AuditEvent.event_type == "ingestion.item.updated",
+                    )
+                )
+            ).all()
+
+            assert len(update_events) == 1
+
+            update_event = update_events[0]
+            assert update_event.actor_principal_id == principal_id
+            assert update_event.document_pk == created.document_pk
+            assert update_event.document_version_id == (
+                updated.document_version_id
+            )
+            assert update_event.details == {}
 
             assert created.outcome == "created"
             assert updated.outcome == "updated"
@@ -378,6 +398,16 @@ async def test_failed_update_preserves_current_version_and_history(
                     .order_by(DocumentVersion.version_number)
                 )
             ).all()
+
+            audit_event_count = await session.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(
+                    AuditEvent.organization_id == organization_id
+                )
+            )
+
+            assert audit_event_count == 1
 
             assert stored_document.current_version_id == (
                 created.document_version_id

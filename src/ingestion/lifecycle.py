@@ -11,7 +11,9 @@ from src.ingestion.canonicalization import (
     canonical_content_hash,
 )
 from src.ingestion.frontmatter import ValidatedMarkdownDocument
-from src.models.storage import Document, DocumentVersion
+from src.models.storage import AuditEvent, Document, DocumentVersion
+
+from datetime import datetime, timezone
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,31 @@ class IngestionResult:
     document_version_id: UUID
     version_number: int
     content_hash: str
+
+
+async def _append_ingestion_audit_event(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    actor_principal_id: UUID,
+    document_pk: UUID,
+    document_version_id: UUID,
+    event_type: str,
+) -> None:
+    session.add(
+        AuditEvent(
+            organization_id=organization_id,
+            event_type=event_type,
+            outcome="succeeded",
+            actor_kind="principal",
+            actor_principal_id=actor_principal_id,
+            document_pk=document_pk,
+            document_version_id=document_version_id,
+            details={},
+            occurred_at=datetime.now(timezone.utc),
+        )
+    )
+    await session.flush()
 
 
 async def ingest_validated_document(
@@ -78,6 +105,16 @@ async def ingest_validated_document(
             )
 
         if current_version.content_hash == content_hash:
+
+            await _append_ingestion_audit_event(
+                session,
+                organization_id=organization_id,
+                actor_principal_id=actor_principal_id,
+                document_pk=stored_document.id,
+                document_version_id=current_version.id,
+                event_type="ingestion.item.unchanged",
+            )
+
             return IngestionResult(
                 outcome="unchanged",
                 document_pk=stored_document.id,
@@ -99,6 +136,14 @@ async def ingest_validated_document(
         )
 
         if accepted_content_hash == current_version.content_hash:
+            await _append_ingestion_audit_event(
+                session,
+                organization_id=organization_id,
+                actor_principal_id=actor_principal_id,
+                document_pk=stored_document.id,
+                document_version_id=current_version.id,
+                event_type="ingestion.item.unchanged",
+            )
             return IngestionResult(
                 outcome="unchanged",
                 document_pk=stored_document.id,
@@ -153,7 +198,14 @@ async def ingest_validated_document(
         )
         stored_document.current_version_id = version_id
         await session.flush()
-
+        await _append_ingestion_audit_event(
+            session,
+            organization_id=organization_id,
+            actor_principal_id=actor_principal_id,
+            document_pk=stored_document.id,
+            document_version_id=version_id,
+            event_type="ingestion.item.updated",
+        )
         return IngestionResult(
             outcome="updated",
             document_pk=stored_document.id,
@@ -208,6 +260,15 @@ async def ingest_validated_document(
 
     stored_document.current_version_id = version_id
     await session.flush()
+
+    await _append_ingestion_audit_event(
+        session,
+        organization_id=organization_id,
+        actor_principal_id=actor_principal_id,
+        document_pk=document_pk,
+        document_version_id=version_id,
+        event_type="ingestion.item.created",
+    )
 
     return IngestionResult(
         outcome="created",
