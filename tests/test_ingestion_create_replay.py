@@ -211,3 +211,179 @@ async def test_create_then_unchanged_replay_persists_one_version(
         finally:
             await session.close()
             await transaction.rollback()
+
+@pytest.mark.asyncio
+async def test_source_move_updates_current_uri_without_new_version(
+    database_engine: AsyncEngine,
+):
+    markdown = SAMPLE_DOCUMENT.read_text(encoding="utf-8")
+    validated_document = validate_markdown_document(
+        markdown,
+        source_uri=SAMPLE_DOCUMENT.as_uri(),
+    )
+
+    moved_document = validate_markdown_document(
+        markdown,
+        source_uri="file:///vault/archive/fraud-service.md",
+    )
+
+    organization_id = uuid4()
+    principal_id = uuid4()
+
+    async with database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(
+            bind=connection,
+            expire_on_commit=False,
+        )
+
+        try:
+            session.add(
+                Organization(
+                    id=organization_id,
+                    organization_key=f"test-{organization_id}",
+                    display_name="Ingestion Test Organization",
+                    status="active",
+                )
+            )
+            session.add(
+                Principal(
+                    id=principal_id,
+                    organization_id=organization_id,
+                    principal_key=f"test-user-{principal_id}",
+                    principal_kind="user",
+                    display_name="Ingestion Test User",
+                    status="active",
+                )
+            )
+            await session.flush()
+
+            created = await ingest_validated_document(
+                session,
+                organization_id=organization_id,
+                actor_principal_id=principal_id,
+                document=validated_document,
+            )
+            replayed = await ingest_validated_document(
+                session,
+                organization_id=organization_id,
+                actor_principal_id=principal_id,
+                document=moved_document,
+            )
+
+            unchanged = await ingest_validated_document(
+                session,
+                organization_id=organization_id,
+                actor_principal_id=principal_id,
+                document=moved_document,
+            )
+
+            await session.flush()
+
+            stored_document = (
+                await session.scalars(
+                    select(Document).where(
+                        Document.organization_id
+                        == organization_id,
+                        Document.document_id
+                        == "fraud-service",
+                    )
+                )
+            ).one()
+
+            assert (
+                stored_document.current_source_uri
+                == moved_document.source_uri
+            )
+
+            version_count = await session.scalar(
+                select(func.count())
+                .select_from(DocumentVersion)
+                .where(
+                    DocumentVersion.organization_id
+                    == organization_id,
+                    DocumentVersion.document_pk
+                    == stored_document.id,
+                )
+            )
+
+            stored_version = await session.get(
+                DocumentVersion,
+                created.document_version_id,
+            )
+
+            assert stored_version is not None
+            assert stored_version.source_uri == validated_document.source_uri
+            assert version_count == 1
+
+            audit_events = (
+                await session.scalars(
+                    select(AuditEvent).where(
+                        AuditEvent.organization_id == organization_id,
+                        AuditEvent.document_pk == created.document_pk,
+                    )
+                )
+            ).all()
+
+            assert len(audit_events) == 3
+
+            events_by_type = {
+                event.event_type: event
+                for event in audit_events
+            }
+
+            assert set(events_by_type) == {
+                "ingestion.item.created",
+                "document.source_moved",
+                "ingestion.item.unchanged",
+            }
+
+            created_event = events_by_type["ingestion.item.created"]
+            source_moved_event = events_by_type[
+                "document.source_moved"
+            ]
+
+            unchanged_event = events_by_type[
+                "ingestion.item.unchanged"
+            ]
+
+            for event in (
+                created_event,
+                source_moved_event,
+                unchanged_event,
+            ):
+                assert event.outcome == "succeeded"
+                assert event.actor_kind == "principal"
+                assert event.actor_principal_id == principal_id
+                assert event.document_pk == created.document_pk
+                assert event.details == {}
+
+            assert created_event.document_version_id == (
+                created.document_version_id
+            )
+            assert source_moved_event.document_version_id == (
+                replayed.document_version_id
+            )
+
+            assert created.outcome == "created"
+            assert replayed.outcome == "unchanged"
+            assert unchanged.outcome == "unchanged"
+            assert created.document_pk == replayed.document_pk
+            assert (
+                created.document_version_id
+                == replayed.document_version_id
+            )
+            assert created.version_number == 1
+            assert replayed.version_number == 1
+            assert stored_document.current_version_id == (
+                created.document_version_id
+            )
+            assert source_moved_event.document_version_id == (
+                replayed.document_version_id
+            )
+            assert unchanged_event.document_version_id == (
+                unchanged.document_version_id
+            )
+        finally:
+            await session.close()
+            await transaction.rollback()
