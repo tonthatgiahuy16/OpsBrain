@@ -1,7 +1,9 @@
 # OpsBrain Storage Schema Contract
 
 - **Status:** Accepted
-- **Contract version:** `1.0`
+- **Contract version:** `1.1`
+- **Amendment:** `2026-10-23` — Cho phép phased audit foundation trước reindex job và review decision, nhưng không làm suy yếu append-only enforcement, organization isolation hoặc foreign-key integrity.
+
 - **Primary owner:** Backend and Data Engineering
 - **Reviewer:** Corpus and Evaluation
 - **Target milestone:** Milestone 3
@@ -1203,6 +1205,17 @@ Migration phải bảo vệ audit history bằng:
 
 Backup retention, archival duration và external immutable storage được deferred khỏi baseline, nhưng việc deferred này không cho phép application sửa audit event đã commit.
 
+### 13.6.1 Phased audit foundation
+
+Audit foundation có thể được tạo trước `reindex_jobs` và `document_review_decisions` để hỗ trợ các ingestion event đã có storage, với các điều kiện bắt buộc sau:
+
+- Revision foundation chỉ tạo composite foreign key tới resource đã tồn tại: organization, principal, document, document version và ingestion job.
+- `reindex_job_id` và `review_decision_id` vẫn tồn tại trong schema nhưng mọi row phải bị check constraint buộc hai cột này là `null` cho tới khi bảng referenced tương ứng đã tồn tại.
+- Migration tạo reindex job hoặc review decision phải bỏ check constraint tạm, thêm composite foreign key cùng organization, rồi có runtime test cho cả reference hợp lệ và cross-organization reference bị từ chối.
+- Phase này không được ghi audit event giả cho workflow chưa triển khai, cũng không biến audit foundation thành bằng chứng rằng reindex, review decision, ACL hoặc retrieval đã tồn tại.
+- Yêu cầu tại 13.6 vẫn giữ nguyên: database role dùng bởi application không được có quyền `UPDATE` hoặc `DELETE` trên `audit_events`; trigger từ chối update/delete là lớp bảo vệ bổ sung, không thay thế database privilege.
+- Exception này chỉ thay đổi dependency order cho reference chưa có bảng; mọi foreign key đã có thể tạo phải tiếp tục dùng `ON DELETE RESTRICT` và bảo toàn organization isolation.
+
 ## 14. Document lifecycle and computed eligibility
 
 ### 14.1 Computed state
@@ -1349,7 +1362,7 @@ Required rules:
 
 ### 15.2 Baseline creation order
 
-Migration có thể được chia thành nhiều revision, nhưng dependency order phải tương đương:
+Migration có thể được chia thành nhiều revision, nhưng dependency order phải tương đương với danh sách dưới đây, ngoại trừ phased audit foundation được mô tả tại 13.6.1. Ngoại lệ này không cho phép tạo reference tới bảng chưa tồn tại hoặc bỏ qua constraint bắt buộc của resource đã có.
 
 1. Kiểm tra hoặc tạo required PostgreSQL extensions.
 2. Tạo `organizations`.
