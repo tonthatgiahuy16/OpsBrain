@@ -13,6 +13,7 @@ from src.models.storage import (
     DocumentVersion,
     Organization,
     Principal,
+    AuditEvent,
 )
 
 SAMPLE_DOCUMENT = (
@@ -152,6 +153,46 @@ async def test_create_then_unchanged_replay_persists_one_version(
                     DocumentVersion.document_pk
                     == stored_document.id,
                 )
+            )
+
+            audit_events = (
+                await session.scalars(
+                    select(AuditEvent).where(
+                        AuditEvent.organization_id == organization_id,
+                        AuditEvent.document_pk == created.document_pk,
+                    )
+                )
+            ).all()
+
+            assert len(audit_events) == 2
+
+            events_by_type = {
+                event.event_type: event
+                for event in audit_events
+            }
+
+            assert set(events_by_type) == {
+                "ingestion.item.created",
+                "ingestion.item.unchanged",
+            }
+
+            created_event = events_by_type["ingestion.item.created"]
+            unchanged_event = events_by_type[
+                "ingestion.item.unchanged"
+            ]
+
+            for event in (created_event, unchanged_event):
+                assert event.outcome == "succeeded"
+                assert event.actor_kind == "principal"
+                assert event.actor_principal_id == principal_id
+                assert event.document_pk == created.document_pk
+                assert event.details == {}
+
+            assert created_event.document_version_id == (
+                created.document_version_id
+            )
+            assert unchanged_event.document_version_id == (
+                replayed.document_version_id
             )
 
             assert created.outcome == "created"
