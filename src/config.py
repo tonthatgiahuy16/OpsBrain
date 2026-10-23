@@ -12,13 +12,15 @@ class Settings(BaseSettings):
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
 
-    # PostgreSQL Database
-    POSTGRES_USER: str = "opsbrain_user"
-    POSTGRES_PASSWORD: str = "opsbrain_password"
-    POSTGRES_DB: str = "opsbrain"
-    POSTGRES_HOST: str = "localhost"
-    POSTGRES_PORT: int = 5432
-    DATABASE_URL: str = "postgresql+asyncpg://opsbrain_user:opsbrain_password@localhost:5432/opsbrain"
+    # PostgreSQL runtime and migration connections
+    DATABASE_URL: str = (
+        "postgresql+asyncpg://opsbrain_app:"
+        "opsbrain_app_password@localhost:5432/opsbrain"
+    )
+    MIGRATION_DATABASE_URL: str = (
+        "postgresql+asyncpg://opsbrain_owner:"
+        "opsbrain_owner_password@localhost:5432/opsbrain"
+    )
 
     # Ollama Local Configuration (Milestone 2+)
     OLLAMA_BASE_URL: str = "http://localhost:11434"

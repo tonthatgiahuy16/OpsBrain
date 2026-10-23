@@ -6,7 +6,7 @@ The project is implemented as small, tested vertical slices. Retrieval, ACL enfo
 
 ## 1. Current status
 
-Latest repository checkpoint: `2026-10-22`, merge commit `e70e160` on `main` (Pull Request #14). The ingestion-job implementation commit is `3a1aa75`.
+Latest merged repository checkpoint: `2026-10-23`, merge commit `17b0b5a` on `main` (Pull Request #15). The audit-event storage work described below is local feature-branch work and is not yet merged.
 
 ### Implemented and tested
 
@@ -19,6 +19,7 @@ Latest repository checkpoint: `2026-10-22`, merge commit `e70e160` on `main` (Pu
 - Canonical content hashing for validated Markdown.
 - A sequential PostgreSQL ingestion lifecycle supporting initial creation, unchanged replay, body and metadata updates, immutable version history, parent-version lineage, review-state reset, and rollback behavior covered by tests.
 - Database constraints for ingestion jobs, items, and attempts, including organization isolation, principal-scoped idempotency-key uniqueness, and terminal-state consistency.
+- Audit-event storage foundation: the `audit_events` table, scoped foreign-key and check constraints, query indexes, an append-only trigger, and separate database roles for migrations and application runtime.
 
 ### Latest recorded evidence
 
@@ -31,13 +32,20 @@ The following results were recorded for implementation commit `3a1aa75` before i
 - `python -m alembic check`: `No new upgrade operations detected.`
 - Alembic revision `b4b2a6760f09` was applied locally and reported as the migration head.
 
+The following feature-branch results were recorded after recreating the local PostgreSQL volume and applying the current migration chain:
+
+- Audit-event storage tests: `7 passed`.
+- Alembic revision `5a58f7c5c515` was applied and reported as the migration head.
+- The application role has only `SELECT` and `INSERT` privileges on `audit_events`; update and delete are rejected by database privileges. The append-only trigger also rejects update and delete for the table owner.
+- `python -m alembic check`: `No new upgrade operations detected.`
+
 These are repository-recorded results for the stated commit and development environment. They were not independently rerun as part of this README update.
 
 ### Not implemented or not yet demonstrated
 
 - Request-to-job orchestration, item processing, a retry worker, and the request-level idempotency flow.
 - FastAPI ingestion and query endpoints defined by the minimal API contract.
-- Audit, ACL, derived-data, chunk, embedding, and relationship tables.
+- Audit-event emission by application workflows, ACL, derived-data, chunk, embedding, and relationship tables.
 - Concurrent document creation or concurrent semantic updates.
 - Complete source move, delete, restore, and rebuild lifecycles.
 - Ollama embeddings or answer generation.
@@ -81,7 +89,9 @@ OpsBrain/
 │   ├── env.py
 │   └── versions/
 │       ├── 940c9eb1716a_create_core_storage_tables.py
-│       └── b4b2a6760f09_create_ingestion_job_storage.py
+│       ├── b4b2a6760f09_create_ingestion_job_storage.py
+│       ├── a827ee2cd02b_create_audit_event_storage.py
+│       └── 5a58f7c5c515_enforce_audit_events_append_only.py
 ├── data/
 │   └── sample-vault/
 │       └── payment-service/
@@ -92,6 +102,7 @@ OpsBrain/
 │   │   └── storage-schema.md
 │   └── project-specification.md
 ├── migrations/
+│   ├── init_roles.sh
 │   └── init_pgvector.sql
 ├── src/
 │   ├── config.py
@@ -111,7 +122,9 @@ OpsBrain/
     ├── test_ingestion_job_storage.py
     ├── test_ingestion_job_storage_database.py
     ├── test_ingestion_semantic_update.py
-    └── test_storage_models.py
+    ├── test_storage_models.py
+    ├── test_audit_event_storage.py
+    └── test_audit_event_storage_database.py
 ```
 
 `migrations/init_pgvector.sql` only enables the PostgreSQL `vector` extension when the database volume is initialized. Alembic manages the application schema.
@@ -149,10 +162,16 @@ If PostgreSQL host port `5432` is already in use, change `POSTGRES_PORT` in `.en
 POSTGRES_PORT=55432
 ```
 
-Keep `DATABASE_URL` on the `db` hostname and port `5432` for the API running inside Docker Compose:
+OpsBrain uses two PostgreSQL roles:
+
+- `opsbrain_owner` owns the schema and is used only to initialize PostgreSQL and run Alembic migrations.
+- `opsbrain_app` is the least-privilege runtime role used by the API and application tests. It can read and insert audit events, but cannot update or delete them.
+
+Keep `DATABASE_URL` on the `db` hostname and port `5432` for the API running inside Docker Compose. `MIGRATION_DATABASE_URL` is for Alembic running from the Windows host, so it must use the published host port instead:
 
 ```dotenv
-DATABASE_URL=postgresql+asyncpg://<user>:<password>@db:5432/<database>
+DATABASE_URL=postgresql+asyncpg://opsbrain_app:<app-password>@db:5432/opsbrain
+MIGRATION_DATABASE_URL=postgresql+asyncpg://opsbrain_owner:<owner-password>@127.0.0.1:<published-port>/opsbrain
 ```
 
 Never add real credentials to Git, the README, issues, pull requests, or public logs.
@@ -168,18 +187,20 @@ Check pgvector:
 
 ```powershell
 docker compose exec db psql -At `
-  -U opsbrain_user `
+  -U opsbrain_owner `
   -d opsbrain `
   -c "SELECT extname, extversion FROM pg_extension ORDER BY extname;"
 ```
 
-If you changed `POSTGRES_USER` or `POSTGRES_DB` in `.env`, update the corresponding values in this command.
+If you changed `POSTGRES_OWNER_USER` or `POSTGRES_DB` in `.env`, update the corresponding values in this command.
 
 Show the PostgreSQL port published to the host:
 
 ```powershell
 docker compose port db 5432
 ```
+
+`migrations/init_roles.sh` creates the application role and default grants only when PostgreSQL initializes an empty data volume. After changing this bootstrap script, recreate the local development volume before validating the new role setup.
 
 ### 5.3 Prepare the Python environment
 
@@ -194,10 +215,10 @@ python -m pip install -r requirements.txt
 
 Python and Alembic running on the Windows host must connect through PostgreSQL's published host port, not the Docker hostname `db`.
 
-Temporarily set `DATABASE_URL` with the user, password, database, and published port from `.env`:
+Temporarily set `MIGRATION_DATABASE_URL` with the owner user, owner password, database, and published port from `.env`:
 
 ```powershell
-$env:DATABASE_URL = "postgresql+asyncpg://<user>:<password>@127.0.0.1:<published-port>/<database>"
+$env:MIGRATION_DATABASE_URL = "postgresql+asyncpg://<owner-user>:<owner-password>@127.0.0.1:<published-port>/<database>"
 
 python -m alembic upgrade head
 python -m alembic current
@@ -206,13 +227,13 @@ python -m alembic current
 Expected `alembic current` output:
 
 ```text
-b4b2a6760f09 (head)
+5a58f7c5c515 (head)
 ```
 
-Remove the override from the PowerShell session when finished:
+Remove the migration override from the PowerShell session when finished:
 
 ```powershell
-Remove-Item Env:DATABASE_URL
+Remove-Item Env:MIGRATION_DATABASE_URL
 ```
 
 ### 5.5 Build and start the API
@@ -267,16 +288,18 @@ A successful health check proves only that the API can connect to PostgreSQL and
 
 ### 6.1 Local test suite
 
-Make sure PostgreSQL is running and set `DATABASE_URL` for the Windows host:
+Make sure PostgreSQL is running. Set the runtime URL with the application role and the migration URL with the owner role, both using the published host port:
 
 ```powershell
-$env:DATABASE_URL = "postgresql+asyncpg://<user>:<password>@127.0.0.1:<published-port>/<database>"
+$env:DATABASE_URL = "postgresql+asyncpg://<app-user>:<app-password>@127.0.0.1:<published-port>/<database>"
+$env:MIGRATION_DATABASE_URL = "postgresql+asyncpg://<owner-user>:<owner-password>@127.0.0.1:<published-port>/<database>"
 
 python -m compileall -q .\src .\tests
 python -m pytest .\tests -q -p no:cacheprovider
 python -m alembic check
 
 Remove-Item Env:DATABASE_URL
+Remove-Item Env:MIGRATION_DATABASE_URL
 ```
 
 Recorded at implementation commit `3a1aa75`:
@@ -301,7 +324,7 @@ docker compose run --rm --no-deps `
   -v "${PWD}/tests:/app/tests:ro" `
   -v "${PWD}/data:/app/data:ro" `
   api `
-  sh -lc 'export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}"; python -m pytest /app/tests -q -p no:cacheprovider'
+  sh -lc 'python -m pytest /app/tests -q -p no:cacheprovider'
 ```
 
 Recorded at implementation commit `3a1aa75`:
