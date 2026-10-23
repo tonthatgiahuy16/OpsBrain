@@ -436,6 +436,153 @@ class IngestionJobAttempt(Base):
     )
 
 
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(
+        PGUUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+
+    event_type = Column(Text, nullable=False)
+    outcome = Column(Text, nullable=False)
+    actor_kind = Column(Text, nullable=False)
+    actor_principal_id = Column(PGUUID(as_uuid=True), nullable=True)
+    request_id = Column(Text, nullable=True)
+    correlation_id = Column(Text, nullable=True)
+    document_pk = Column(PGUUID(as_uuid=True), nullable=True)
+    document_version_id = Column(PGUUID(as_uuid=True), nullable=True)
+    ingestion_job_id = Column(PGUUID(as_uuid=True), nullable=True)
+    reindex_job_id = Column(PGUUID(as_uuid=True), nullable=True)
+    review_decision_id = Column(PGUUID(as_uuid=True), nullable=True)
+    reason_code = Column(Text, nullable=True)
+    details = Column(JSONB, nullable=False)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id"),
+        ForeignKeyConstraint(
+            ["organization_id", "actor_principal_id"],
+            ["principals.organization_id", "principals.id"],
+            name="fk_audit_events_actor_principal",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "document_pk"],
+            ["documents.organization_id", "documents.id"],
+            name="fk_audit_events_document",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "document_pk", "document_version_id"],
+            [
+                "document_versions.organization_id",
+                "document_versions.document_pk",
+                "document_versions.id",
+            ],
+            name="fk_audit_events_document_version",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "ingestion_job_id"],
+            ["ingestion_jobs.organization_id", "ingestion_jobs.id"],
+            name="fk_audit_events_ingestion_job",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_audit_events_org_occurred_at",
+            "organization_id",
+            "occurred_at",
+        ),
+        Index(
+            "ix_audit_events_org_actor_occurred_at",
+            "organization_id",
+            "actor_principal_id",
+            "occurred_at",
+        ),
+        Index(
+            "ix_audit_events_org_document_occurred_at",
+            "organization_id",
+            "document_pk",
+            "occurred_at",
+        ),
+        Index(
+            "ix_audit_events_request_id",
+            "request_id",
+            postgresql_where=text("request_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_audit_events_correlation_id",
+            "correlation_id",
+            postgresql_where=text("correlation_id IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "btrim(event_type) <> ''",
+            name="event_type_not_blank",
+        ),
+        CheckConstraint(
+            "outcome IN ('succeeded', 'failed', 'denied')",
+            name="outcome_allowed",
+        ),
+        CheckConstraint(
+            "actor_kind IN ('principal', 'system')",
+            name="actor_kind_allowed",
+        ),
+        CheckConstraint(
+            (
+                "(actor_kind = 'principal' "
+                "AND actor_principal_id IS NOT NULL) "
+                "OR "
+                "(actor_kind = 'system' "
+                "AND actor_principal_id IS NULL)"
+            ),
+            name="actor_kind_consistent",
+        ),
+        CheckConstraint(
+            "request_id IS NULL OR btrim(request_id) <> ''",
+            name="request_id_not_blank_when_present",
+        ),
+        CheckConstraint(
+            "correlation_id IS NULL OR btrim(correlation_id) <> ''",
+            name="correlation_id_not_blank_when_present",
+        ),
+        CheckConstraint(
+            "reason_code IS NULL OR btrim(reason_code) <> ''",
+            name="reason_code_not_blank_when_present",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(details) = 'object'",
+            name="details_object",
+        ),
+        CheckConstraint(
+            (
+                "btrim(coalesce(request_id, '')) <> '' "
+                "OR btrim(coalesce(correlation_id, '')) <> '' "
+                "OR actor_principal_id IS NOT NULL "
+                "OR document_pk IS NOT NULL "
+                "OR document_version_id IS NOT NULL "
+                "OR ingestion_job_id IS NOT NULL"
+            ),
+            name="trace_anchor_present",
+        ),
+        CheckConstraint(
+            "document_version_id IS NULL OR document_pk IS NOT NULL",
+            name="document_version_requires_document",
+        ),
+        CheckConstraint(
+            "reindex_job_id IS NULL AND review_decision_id IS NULL",
+            name="deferred_refs_null",
+        ),
+    )
+
+
 class Document(Base):
     __tablename__ = "documents"
 
