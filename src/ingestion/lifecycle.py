@@ -186,8 +186,9 @@ async def ingest_validated_document(
                 "current document version could not be resolved"
             )
 
-        if current_version.content_hash == content_hash:
+        is_restore = stored_document.record_state == "deleted"
 
+        if not is_restore and current_version.content_hash == content_hash:
             event_type = "ingestion.item.unchanged"
             if stored_document.current_source_uri != document.source_uri:
                 stored_document.current_source_uri = document.source_uri
@@ -222,7 +223,7 @@ async def ingest_validated_document(
             accepted_document
         )
 
-        if accepted_content_hash == current_version.content_hash:
+        if not is_restore and accepted_content_hash == current_version.content_hash:
             await _append_ingestion_audit_event(
                 session,
                 organization_id=organization_id,
@@ -239,12 +240,14 @@ async def ingest_validated_document(
                 content_hash=current_version.content_hash,
             )
 
-        change_kind = (
-            "content_update"
-            if accepted_document.body
-            != current_version.markdown_body
-            else "metadata_update"
-        )
+        if is_restore:
+            change_kind = "restore"
+        else:
+            change_kind = (
+                "content_update"
+                if accepted_document.body != current_version.markdown_body
+                else "metadata_update"
+            )
 
         version_id = uuid4()
         version_number = current_version.version_number + 1
@@ -280,6 +283,11 @@ async def ingest_validated_document(
         session.add(updated_version)
         await session.flush()
 
+        if is_restore:
+            stored_document.record_state = "active"
+            stored_document.deleted_at = None
+            stored_document.deleted_by_principal_id = None
+
         stored_document.current_source_uri = (
             accepted_document.source_uri
         )
@@ -291,7 +299,11 @@ async def ingest_validated_document(
             actor_principal_id=actor_principal_id,
             document_pk=stored_document.id,
             document_version_id=version_id,
-            event_type="ingestion.item.updated",
+            event_type=(
+                "document.restored"
+                if is_restore
+                else "ingestion.item.updated"
+            ),
         )
         return IngestionResult(
             outcome="updated",
