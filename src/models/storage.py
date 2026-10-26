@@ -854,3 +854,72 @@ class DocumentVersion(Base):
             "content_hash",
         ),
     )
+
+
+class DerivedConfiguration(Base):
+    __tablename__ = "derived_configurations"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(
+        PGUUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    configuration_key = Column(Text, nullable=False)
+    chunking_version = Column(Text, nullable=False)
+    embedding_model = Column(Text, nullable=True)
+    embedding_model_revision = Column(Text, nullable=True)
+    embedding_dimensions = Column(Integer, nullable=True)
+    full_text_configuration = Column(Text, nullable=True)
+    relationship_extractor_version = Column(Text, nullable=True)
+    configuration_payload = Column(JSONB, nullable=False)
+    configuration_hash = Column(Text, nullable=False)
+    status = Column(Text, nullable=False)
+    created_by_principal_id = Column(
+        PGUUID(as_uuid=True),
+        nullable=False,
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "configuration_key"),
+        UniqueConstraint("organization_id", "id"),
+        ForeignKeyConstraint(
+            ["organization_id", "created_by_principal_id"],
+            ["principals.organization_id", "principals.id"],
+            name="fk_derived_configurations_created_by_principal",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "btrim(configuration_key) <> ''",
+            name="configuration_key_not_blank",
+        ),
+        CheckConstraint(
+            "btrim(chunking_version) <> ''",
+            name="chunking_version_not_blank",
+        ),
+        CheckConstraint(
+            "configuration_hash ~ '^[0-9a-f]{64}$'",
+            name="configuration_hash_sha256_hex",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(configuration_payload) = 'object'",
+            name="configuration_payload_object",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'retired')",
+            name="status_allowed",
+        ),
+        CheckConstraint(
+            "embedding_dimensions IS NULL OR embedding_dimensions > 0",
+            name="embedding_dimensions_positive",
+        ),
+        CheckConstraint(
+            "embedding_model IS NULL OR embedding_dimensions IS NOT NULL",
+            name="embedding_model_requires_dimensions",
+        ),
+    )
