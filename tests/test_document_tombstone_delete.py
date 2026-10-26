@@ -253,3 +253,218 @@ async def test_delete_rejects_cross_organization_actor_without_partial_state(
         finally:
             await session.close()
             await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_ingest_deleted_document_creates_restore_version(
+    database_engine: AsyncEngine,
+    monkeypatch,
+):
+    markdown = SAMPLE_DOCUMENT.read_text(encoding="utf-8").replace(
+        "review_state: in_review",
+        "review_state: draft",
+        1,
+    )
+    document = validate_markdown_document(
+        markdown,
+        source_uri=SAMPLE_DOCUMENT.as_uri(),
+    )
+
+    organization_id = uuid4()
+    principal_id = uuid4()
+
+    async with database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+
+        try:
+            session.add_all(
+                [
+                    Organization(
+                        id=organization_id,
+                        organization_key=f"test-{organization_id}",
+                        display_name="Restore Test Organization",
+                        status="active",
+                    ),
+                    Principal(
+                        id=principal_id,
+                        organization_id=organization_id,
+                        principal_key=f"test-user-{principal_id}",
+                        principal_kind="user",
+                        display_name="Restore Test User",
+                        status="active",
+                    ),
+                ]
+            )
+            await session.flush()
+
+            created = await ingest_validated_document(
+                session,
+                organization_id=organization_id,
+                actor_principal_id=principal_id,
+                document=document,
+            )
+
+            await delete_document(
+                session,
+                organization_id=organization_id,
+                actor_principal_id=principal_id,
+                document_id="fraud-service",
+            )
+
+            runbook_path = (
+                SAMPLE_DOCUMENT.parents[1]
+                / "runbooks"
+                / "payment-service-503-diagnosis.md"
+            )
+            wrong_type_markdown = runbook_path.read_text(
+                encoding="utf-8"
+            ).replace(
+                "document_id: payment-service-503-diagnosis",
+                "document_id: fraud-service",
+                1,
+            )
+            wrong_type_document = validate_markdown_document(
+                wrong_type_markdown,
+                source_uri=runbook_path.as_uri(),
+            )
+
+            with pytest.raises(
+                ValueError,
+                match="document_type cannot change",
+            ):
+                await ingest_validated_document(
+                    session,
+                    organization_id=organization_id,
+                    actor_principal_id=principal_id,
+                    document=wrong_type_document,
+                )
+
+            after_rejection = await session.scalar(
+                select(Document).where(Document.id == created.document_pk)
+            )
+            versions_after_rejection = (
+                await session.scalars(
+                    select(DocumentVersion).where(
+                        DocumentVersion.document_pk == created.document_pk
+                    )
+                )
+            ).all()
+            restore_event_after_rejection = await session.scalar(
+                select(AuditEvent).where(
+                    AuditEvent.document_pk == created.document_pk,
+                    AuditEvent.event_type == "document.restored",
+                )
+            )
+
+            assert after_rejection.record_state == "deleted"
+            assert after_rejection.deleted_at is not None
+            assert after_rejection.deleted_by_principal_id == principal_id
+            assert len(versions_after_rejection) == 2
+            assert restore_event_after_rejection is None
+
+            tombstone_id = after_rejection.current_version_id
+
+            async def fail_restore_audit(*args, **kwargs):
+                raise RuntimeError("simulated audit failure")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    "src.ingestion.lifecycle._append_ingestion_audit_event",
+                    fail_restore_audit,
+                )
+
+                with pytest.raises(RuntimeError, match="simulated audit failure"):
+                    async with session.begin_nested():
+                        await ingest_validated_document(
+                            session,
+                            organization_id=organization_id,
+                            actor_principal_id=principal_id,
+                            document=document,
+                        )
+
+            after_failure = await session.scalar(
+                select(Document).where(Document.id == created.document_pk)
+            )
+            versions_after_failure = (
+                await session.scalars(
+                    select(DocumentVersion).where(
+                        DocumentVersion.document_pk == created.document_pk
+                    )
+                )
+            ).all()
+            restore_event_after_failure = await session.scalar(
+                select(AuditEvent).where(
+                    AuditEvent.document_pk == created.document_pk,
+                    AuditEvent.event_type == "document.restored",
+                )
+            )
+
+            assert after_failure.record_state == "deleted"
+            assert after_failure.current_version_id == tombstone_id
+            assert after_failure.deleted_at is not None
+            assert after_failure.deleted_by_principal_id == principal_id
+            assert len(versions_after_failure) == 2
+            assert restore_event_after_failure is None
+
+            restored_result = await ingest_validated_document(
+                session,
+                organization_id=organization_id,
+                actor_principal_id=principal_id,
+                document=document,
+            )
+
+            replayed = await ingest_validated_document(
+                session,
+                organization_id=organization_id,
+                actor_principal_id=principal_id,
+                document=document,
+            )
+
+            stored_document = await session.scalar(
+                select(Document).where(
+                    Document.id == created.document_pk,
+                )
+            )
+            versions = (
+                await session.scalars(
+                    select(DocumentVersion)
+                    .where(
+                        DocumentVersion.document_pk == created.document_pk,
+                    )
+                    .order_by(DocumentVersion.version_number)
+                )
+            ).all()
+            restore_events = (
+                await session.scalars(
+                    select(AuditEvent).where(
+                        AuditEvent.document_pk == created.document_pk,
+                        AuditEvent.event_type == "document.restored",
+                    )
+                )
+            ).all()
+
+            assert len(versions) == 3
+            original, tombstone, restored = versions
+
+            assert replayed.outcome == "unchanged"
+            assert replayed.document_version_id == restored.id
+
+            assert original.id == created.document_version_id
+            assert restored.version_number == 3
+            assert restored.parent_version_id == tombstone.id
+            assert restored.change_kind == "restore"
+            assert restored.review_state == "in_review"
+            assert restored_result.outcome == "updated"
+            assert restored_result.document_version_id == restored.id
+
+            assert stored_document.record_state == "active"
+            assert stored_document.deleted_at is None
+            assert stored_document.deleted_by_principal_id is None
+            assert stored_document.current_version_id == restored.id
+
+            assert len(restore_events) == 1
+            assert restore_events[0].document_version_id == restored.id
+        finally:
+            await session.close()
+            await transaction.rollback()
