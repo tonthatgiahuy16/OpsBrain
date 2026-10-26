@@ -879,6 +879,7 @@ class DerivedConfiguration(Base):
         PGUUID(as_uuid=True),
         nullable=False,
     )
+    first_used_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -921,5 +922,96 @@ class DerivedConfiguration(Base):
         CheckConstraint(
             "embedding_model IS NULL OR embedding_dimensions IS NOT NULL",
             name="embedding_model_requires_dimensions",
+        ),
+    )
+
+
+class DerivedSet(Base):
+    __tablename__ = "derived_sets"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    document_pk = Column(PGUUID(as_uuid=True), nullable=False)
+    document_version_id = Column(PGUUID(as_uuid=True), nullable=False)
+    configuration_id = Column(PGUUID(as_uuid=True), nullable=False)
+    build_number = Column(Integer, nullable=False)
+    status = Column(Text, nullable=False)
+    is_active = Column(Boolean, nullable=False, server_default=text("false"))
+    failure_code = Column(Text, nullable=True)
+    failure_message = Column(Text, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    activated_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id"),
+        UniqueConstraint(
+            "organization_id",
+            "document_version_id",
+            "configuration_id",
+            "build_number",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "document_pk", "document_version_id"],
+            [
+                "document_versions.organization_id",
+                "document_versions.document_pk",
+                "document_versions.id",
+            ],
+            name="fk_derived_sets_document_version",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "configuration_id"],
+            ["derived_configurations.organization_id", "derived_configurations.id"],
+            name="fk_derived_sets_configuration",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "build_number > 0",
+            name="build_number_positive",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'building', 'ready', 'stale', 'failed')",
+            name="status_allowed",
+        ),
+        CheckConstraint(
+            "status <> 'pending' OR "
+            "(started_at IS NULL AND completed_at IS NULL AND activated_at IS NULL)",
+            name="pending_timestamps",
+        ),
+        CheckConstraint(
+            "status <> 'building' OR "
+            "(started_at IS NOT NULL AND completed_at IS NULL)",
+            name="building_timestamps",
+        ),
+        CheckConstraint(
+            "status NOT IN ('ready', 'stale', 'failed') OR completed_at IS NOT NULL",
+            name="terminal_completed_at",
+        ),
+        CheckConstraint(
+            "status <> 'failed' OR "
+            "(failure_code IS NOT NULL AND btrim(failure_code) <> '')",
+            name="failed_requires_code",
+        ),
+        CheckConstraint(
+            "NOT is_active OR status = 'ready'",
+            name="active_requires_ready",
+        ),
+        CheckConstraint(
+            "NOT is_active OR activated_at IS NOT NULL",
+            name="active_requires_activated_at",
+        ),
+        Index(
+            "uq_derived_sets_one_active_per_document",
+            "organization_id",
+            "document_pk",
+            unique=True,
+            postgresql_where=text("is_active"),
         ),
     )

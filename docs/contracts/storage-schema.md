@@ -559,6 +559,7 @@ Bảng này ghi lại cấu hình dùng để tạo dữ liệu dẫn xuất. Th
 | `configuration_hash` | `text` | Not null | Hash của canonical configuration |
 | `status` | `text` | Not null, check `active`, `retired` | Trạng thái configuration |
 | `created_by_principal_id` | `uuid` | Not null | Actor đăng ký configuration |
+| `first_used_at` | `timestamptz` | Nullable | Thời điểm configuration lần đầu được derived set sử dụng |
 | `created_at` | `timestamptz` | Not null | Thời điểm tạo |
 
 Required constraints:
@@ -570,6 +571,8 @@ Required constraints:
 - `configuration_payload` phải là JSON object.
 - Nếu khai báo embedding model thì `embedding_dimensions` phải có giá trị.
 - Configuration đã được một derived set sử dụng là immutable.
+- `first_used_at` được ghi khi derived set đầu tiên tham chiếu configuration và không bị xóa khi derived set được cleanup.
+- Khi `first_used_at` có giá trị, configuration không được cập nhật.
 - Secret, Bearer token, credential và filesystem path riêng của máy không được lưu trong `configuration_payload`.
 
 ### 10.2 `derived_sets`
