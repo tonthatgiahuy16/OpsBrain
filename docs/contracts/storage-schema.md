@@ -569,6 +569,8 @@ Required constraints:
 - `(organization_id, created_by_principal_id)` tham chiếu principal trong cùng organization.
 - `configuration_hash` phải là lowercase SHA-256 hex gồm 64 ký tự.
 - `configuration_payload` phải là JSON object.
+- Với `chunking_version: chunk-v1`, `configuration_payload.max_characters`
+  là số nguyên dương bắt buộc, xác định giới hạn ký tự của chunker.
 - Nếu khai báo embedding model thì `embedding_dimensions` phải có giá trị.
 - Configuration đã được một derived set sử dụng là immutable.
 - `first_used_at` được ghi khi derived set đầu tiên tham chiếu configuration và không bị xóa khi derived set được cleanup.

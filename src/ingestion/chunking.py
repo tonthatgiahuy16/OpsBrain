@@ -5,6 +5,9 @@ import re
 from src.ingestion.canonicalization import normalize_markdown_body
 
 
+CHUNKING_VERSION = "chunk-v1"
+
+
 _HEADING_PATTERN = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$")
 _FENCE_PATTERN = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 _LIST_ITEM_PATTERN = re.compile(
