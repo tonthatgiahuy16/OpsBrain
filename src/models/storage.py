@@ -1015,3 +1015,104 @@ class DerivedSet(Base):
             postgresql_where=text("is_active"),
         ),
     )
+
+class Chunk(Base):
+    __tablename__ = "chunks"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    derived_set_id = Column(PGUUID(as_uuid=True), nullable=False)
+    document_pk = Column(PGUUID(as_uuid=True), nullable=False)
+    document_version_id = Column(PGUUID(as_uuid=True), nullable=False)
+    chunk_key = Column(Text, nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    chunking_version = Column(Text, nullable=False)
+    heading_path = Column(
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    )
+    content = Column(Text, nullable=False)
+    content_hash = Column(Text, nullable=False)
+    start_offset = Column(Integer, nullable=True)
+    end_offset = Column(Integer, nullable=True)
+    token_count = Column(Integer, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "derived_set_id",
+            "chunk_key",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "derived_set_id",
+            "chunk_index",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "derived_set_id",
+            "id",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "derived_set_id"],
+            ["derived_sets.organization_id", "derived_sets.id"],
+            name="fk_chunks_derived_set",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "organization_id",
+                "document_pk",
+                "document_version_id",
+            ],
+            [
+                "document_versions.organization_id",
+                "document_versions.document_pk",
+                "document_versions.id",
+            ],
+            name="fk_chunks_document_version",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "btrim(chunk_key) <> ''",
+            name="chunk_key_not_blank",
+        ),
+        CheckConstraint(
+            "chunk_index >= 0",
+            name="chunk_index_non_negative",
+        ),
+        CheckConstraint(
+            "btrim(chunking_version) <> ''",
+            name="chunking_version_not_blank",
+        ),
+        CheckConstraint(
+            "btrim(content) <> ''",
+            name="content_not_blank",
+        ),
+        CheckConstraint(
+            "content_hash ~ '^[0-9a-f]{64}$'",
+            name="content_hash_sha256_hex",
+        ),
+        CheckConstraint(
+            "start_offset IS NULL OR start_offset >= 0",
+            name="start_offset_non_negative",
+        ),
+        CheckConstraint(
+            "end_offset IS NULL OR end_offset >= 0",
+            name="end_offset_non_negative",
+        ),
+        CheckConstraint(
+            "end_offset IS NULL OR start_offset IS NULL OR end_offset > start_offset",
+            name="offsets_ordered",
+        ),
+        CheckConstraint(
+            "token_count IS NULL OR token_count >= 0",
+            name="token_count_non_negative",
+        ),
+    )
