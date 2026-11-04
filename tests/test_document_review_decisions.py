@@ -1,5 +1,7 @@
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 from uuid import uuid4
 
 import pytest
@@ -17,6 +19,9 @@ from src.models.storage import (
     DocumentVersion,
     Organization,
     Principal,
+    DerivedConfiguration,
+    ReindexJob,
+    ReindexJobItem,
 )
 
 
@@ -58,7 +63,16 @@ async def _seed(session: AsyncSession):
         session, organization_id=organization_id,
         actor_principal_id=author_id, document=source,
     )
-    return organization_id, author_id, reviewer_id, ingested
+    configuration = DerivedConfiguration(
+        organization_id=organization_id,
+        configuration_key=f"review-config-{organization_id}",
+        chunking_version="v1", configuration_payload={},
+        configuration_hash="c" * 64, status="active",
+        created_by_principal_id=author_id,
+    )
+    session.add(configuration)
+    await session.flush()
+    return organization_id, author_id, reviewer_id, ingested, configuration
 
 
 def _make_child_version(
@@ -114,7 +128,7 @@ async def test_approve_persists_one_version_decision_and_audit_and_replays(
         transaction = await connection.begin()
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
-            organization_id, _, reviewer_id, ingested = await _seed(session)
+            organization_id, _, reviewer_id, ingested, configuration = await _seed(session)
             kwargs = dict(
                 organization_id=organization_id,
                 document_pk=ingested.document_pk,
@@ -122,6 +136,7 @@ async def test_approve_persists_one_version_decision_and_audit_and_replays(
                 reviewer_principal_id=reviewer_id,
                 decision="approve", reason="Reviewed runbook evidence",
                 request_id="review-request-1", idempotency_key="review-key-1",
+                selected_configuration_id=configuration.id,
             )
             first = await submit_review_decision(session, **kwargs)
             replay = await submit_review_decision(
@@ -130,6 +145,26 @@ async def test_approve_persists_one_version_decision_and_audit_and_replays(
             assert first.replayed is False
             assert replay.replayed is True
             assert replay.decision.id == first.decision.id
+            assert replay.reindex_job_id == first.reindex_job_id
+            assert first.reindex_job_id is not None
+            job = await session.get(ReindexJob, first.reindex_job_id)
+            assert job.status == "queued" and job.configuration_id == configuration.id
+            current = await session.get(Document, ingested.document_pk)
+            canonical_payload = {
+                "scope_type": "documents",
+                "document_ids": [current.document_id],
+                "targets": ["chunks"],
+                "reason": "review_approved",
+            }
+            expected_hash = hashlib.sha256(json.dumps(
+                canonical_payload, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            assert job.request_payload_hash == expected_hash
+            item = await session.scalar(select(ReindexJobItem).where(ReindexJobItem.reindex_job_id == job.id))
+            assert item.processing_status == "queued"
+            assert item.source_document_version_id == first.resulting_version.id
+            assert await session.scalar(select(func.count()).select_from(AuditEvent).where(AuditEvent.review_decision_id == first.decision.id)) == 2
             assert first.resulting_version.review_state == "approved"
             assert first.resulting_version.change_kind == "review_transition"
             assert await session.scalar(select(func.count()).select_from(DocumentVersion).where(
@@ -139,9 +174,18 @@ async def test_approve_persists_one_version_decision_and_audit_and_replays(
                 DocumentReviewDecision.document_pk == ingested.document_pk
             )) == 1
             event = await session.scalar(select(AuditEvent).where(
-                AuditEvent.review_decision_id == first.decision.id
+                AuditEvent.review_decision_id == first.decision.id,
+                AuditEvent.event_type == "document.review.approved",
             ))
             assert event.event_type == "document.review.approved"
+            accepted = await session.scalar(select(AuditEvent).where(
+                AuditEvent.review_decision_id == first.decision.id,
+                AuditEvent.event_type == "reindex.job.accepted",
+            ))
+            assert accepted.reindex_job_id == first.reindex_job_id
+            assert accepted.document_pk == ingested.document_pk
+            assert accepted.document_version_id == first.resulting_version.id
+            assert accepted.request_id == event.request_id
             current = await session.scalar(select(Document).where(Document.id == ingested.document_pk))
             assert current.current_version_id == first.resulting_version.id
         finally:
@@ -157,7 +201,7 @@ async def test_reject_persists_event_and_idempotency_conflict_is_rejected(
         transaction = await connection.begin()
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
-            organization_id, _, reviewer_id, ingested = await _seed(session)
+            organization_id, _, reviewer_id, ingested, _ = await _seed(session)
             rejected = await submit_review_decision(
                 session, organization_id=organization_id,
                 document_pk=ingested.document_pk,
@@ -171,6 +215,7 @@ async def test_reject_persists_event_and_idempotency_conflict_is_rejected(
                 AuditEvent.review_decision_id == rejected.decision.id
             ))
             assert event.event_type == "document.review.rejected"
+            assert rejected.reindex_job_id is None
             with pytest.raises(ValueError, match="idempotency key conflict"):
                 await submit_review_decision(
                     session, organization_id=organization_id,
@@ -180,6 +225,145 @@ async def test_reject_persists_event_and_idempotency_conflict_is_rejected(
                     reason="Different payload", request_id="review-request-3",
                     idempotency_key="review-key-2",
                 )
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configuration_case", ["missing", "inactive", "cross_org"])
+async def test_eligible_approval_rejects_invalid_configuration_without_partial_writes(
+    migration_database_engine, configuration_case,
+):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            organization_id, _, reviewer_id, ingested, configuration = await _seed(session)
+            selected_id = None
+            if configuration_case == "inactive":
+                configuration.status = "retired"
+                selected_id = configuration.id
+                await session.flush()
+            elif configuration_case == "cross_org":
+                other_org = Organization(
+                    organization_key=f"other-{uuid4()}",
+                    display_name="Other", status="active",
+                )
+                session.add(other_org)
+                await session.flush()
+                other_principal = Principal(
+                    organization_id=other_org.id,
+                    principal_key=f"other-user-{uuid4()}",
+                    principal_kind="user", status="active",
+                )
+                session.add(other_principal)
+                await session.flush()
+                other_config = DerivedConfiguration(
+                    organization_id=other_org.id,
+                    configuration_key=f"other-config-{uuid4()}",
+                    chunking_version="v1", configuration_payload={},
+                    configuration_hash="d" * 64, status="active",
+                    created_by_principal_id=other_principal.id,
+                )
+                session.add(other_config)
+                await session.flush()
+                selected_id = other_config.id
+
+            kwargs = dict(
+                organization_id=organization_id, document_pk=ingested.document_pk,
+                expected_version_id=ingested.document_version_id,
+                reviewer_principal_id=reviewer_id, decision="approve",
+                reason="Approve", request_id=f"invalid-config-{configuration_case}",
+                idempotency_key=f"invalid-config-key-{configuration_case}",
+                selected_configuration_id=selected_id,
+            )
+            expected_message = "selected configuration is required" if configuration_case == "missing" else "active configuration not found"
+            with pytest.raises(ValueError, match=expected_message):
+                await submit_review_decision(session, **kwargs)
+            assert await session.scalar(select(func.count()).select_from(DocumentVersion).where(DocumentVersion.document_pk == ingested.document_pk)) == 1
+            assert await session.scalar(select(func.count()).select_from(DocumentReviewDecision)) == 0
+            assert await session.scalar(select(func.count()).select_from(ReindexJob)) == 0
+            assert await session.scalar(select(func.count()).select_from(ReindexJobItem)) == 0
+            assert await session.scalar(select(func.count()).select_from(AuditEvent).where(AuditEvent.request_id == kwargs["request_id"])) == 0
+            document = await session.get(Document, ingested.document_pk)
+            assert document.current_version_id == ingested.document_version_id
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("not_eligible", ["future", "expired", "organization_disabled", "deprecated"])
+async def test_approved_but_pre_acl_ineligible_review_does_not_enqueue(
+    migration_database_engine, not_eligible,
+):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            organization_id, _, reviewer_id, ingested, _ = await _seed(session)
+            document = await session.get(Document, ingested.document_pk)
+            organization = await session.get(Organization, organization_id)
+            reviewed = await session.get(DocumentVersion, ingested.document_version_id)
+            now = datetime.now(timezone.utc)
+            if not_eligible == "future":
+                reviewed.effective_from = now + timedelta(days=1)
+            elif not_eligible == "expired":
+                reviewed.effective_from = None
+                reviewed.effective_until = now - timedelta(days=1)
+            elif not_eligible == "organization_disabled":
+                organization.status = "disabled"
+            elif not_eligible == "deprecated":
+                reviewed.document_status = "deprecated"
+            await session.flush()
+
+            result = await submit_review_decision(
+                session, organization_id=organization_id,
+                document_pk=ingested.document_pk,
+                expected_version_id=ingested.document_version_id,
+                reviewer_principal_id=reviewer_id, decision="approve",
+                reason="Approve but do not enqueue", request_id=f"ineligible-{not_eligible}",
+                idempotency_key=f"ineligible-key-{not_eligible}",
+            )
+            assert result.resulting_version.review_state == "approved"
+            assert result.reindex_job_id is None
+            assert await session.scalar(select(func.count()).select_from(ReindexJob)) == 0
+            assert await session.scalar(select(func.count()).select_from(ReindexJobItem)) == 0
+            events = (await session.scalars(select(AuditEvent).where(AuditEvent.review_decision_id == result.decision.id))).all()
+            assert len(events) == 1
+            assert events[0].event_type == "document.review.approved"
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_deleted_document_is_rejected_before_review_or_enqueue(migration_database_engine):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            organization_id, _, reviewer_id, ingested, _ = await _seed(session)
+            document = await session.get(Document, ingested.document_pk)
+            now = datetime.now(timezone.utc)
+            document.record_state = "deleted"
+            document.deleted_at = now
+            document.deleted_by_principal_id = reviewer_id
+            await session.flush()
+            with pytest.raises(ValueError, match="active document not found"):
+                await submit_review_decision(
+                    session, organization_id=organization_id,
+                    document_pk=ingested.document_pk,
+                    expected_version_id=ingested.document_version_id,
+                    reviewer_principal_id=reviewer_id, decision="approve",
+                    reason="Deleted source", request_id="deleted-review",
+                    idempotency_key="deleted-review-key",
+                )
+            assert await session.scalar(select(func.count()).select_from(DocumentReviewDecision)) == 0
+            assert await session.scalar(select(func.count()).select_from(ReindexJob)) == 0
+            assert await session.scalar(select(func.count()).select_from(ReindexJobItem)) == 0
+            assert await session.scalar(select(func.count()).select_from(AuditEvent).where(AuditEvent.request_id == "deleted-review")) == 0
         finally:
             await session.close()
             await transaction.rollback()
@@ -257,7 +441,7 @@ async def test_review_rejects_author_and_stale_version_without_writes(
         transaction = await connection.begin()
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
-            organization_id, author_id, reviewer_id, ingested = await _seed(session)
+            organization_id, author_id, reviewer_id, ingested, _ = await _seed(session)
             common = dict(
                 organization_id=organization_id,
                 document_pk=ingested.document_pk,
@@ -291,7 +475,7 @@ async def test_review_rejects_current_version_that_is_not_in_review(
         transaction = await connection.begin()
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
-            organization_id, _, reviewer_id, ingested = await _seed(session)
+            organization_id, _, reviewer_id, ingested, _ = await _seed(session)
             reviewed = await session.scalar(select(DocumentVersion).where(
                 DocumentVersion.id == ingested.document_version_id
             ))
@@ -354,7 +538,7 @@ async def test_failure_after_version_and_decision_rolls_back_everything(
         transaction = await connection.begin()
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
-            organization_id, _, reviewer_id, ingested = await _seed(session)
+            organization_id, _, reviewer_id, ingested, config = await _seed(session)
             with pytest.raises(RuntimeError, match="injected audit failure"):
                 await submit_review_decision(
                     session, organization_id=organization_id,
@@ -363,11 +547,14 @@ async def test_failure_after_version_and_decision_rolls_back_everything(
                     reviewer_principal_id=reviewer_id, decision="approve",
                     reason="Reviewed", request_id="review-request-5",
                     idempotency_key="review-key-5",
+                    selected_configuration_id=config.id,
                 )
             assert await session.scalar(select(func.count()).select_from(DocumentVersion).where(
                 DocumentVersion.document_pk == ingested.document_pk
             )) == 1
             assert await session.scalar(select(func.count()).select_from(DocumentReviewDecision)) == 0
+            assert await session.scalar(select(func.count()).select_from(ReindexJob)) == 0
+            assert await session.scalar(select(func.count()).select_from(ReindexJobItem)) == 0
             assert await session.scalar(select(func.count()).select_from(AuditEvent).where(
                 AuditEvent.request_id == "review-request-5"
             )) == 0
@@ -386,8 +573,8 @@ async def test_cross_organization_review_decision_and_audit_references_are_rejec
         transaction = await connection.begin()
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
-            org_a, _, reviewer_a, ingested_a = await _seed(session)
-            org_b, _, reviewer_b, ingested_b = await _seed(session)
+            org_a, _, reviewer_a, ingested_a, config_a = await _seed(session)
+            org_b, _, reviewer_b, ingested_b, _ = await _seed(session)
             decision_a = await submit_review_decision(
                 session, organization_id=org_a,
                 document_pk=ingested_a.document_pk,
@@ -395,6 +582,7 @@ async def test_cross_organization_review_decision_and_audit_references_are_rejec
                 reviewer_principal_id=reviewer_a, decision="approve",
                 reason="Approve fixture A", request_id="cross-org-a",
                 idempotency_key="cross-org-key-a",
+                selected_configuration_id=config_a.id,
             )
 
             version_b = await session.scalar(select(DocumentVersion).where(
@@ -443,8 +631,8 @@ async def test_database_trigger_rejects_invalid_review_lineage_and_state(
         transaction = await connection.begin()
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
-            org_lineage, _, reviewer_lineage, ingested_lineage = await _seed(session)
-            org_state, _, reviewer_state, ingested_state = await _seed(session)
+            org_lineage, _, reviewer_lineage, ingested_lineage, _ = await _seed(session)
+            org_state, _, reviewer_state, ingested_state, _ = await _seed(session)
 
             reviewed_lineage = await session.scalar(select(DocumentVersion).where(
                 DocumentVersion.id == ingested_lineage.document_version_id
@@ -504,7 +692,7 @@ async def test_review_decision_trigger_blocks_owner_update_and_delete(
         transaction = await connection.begin()
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
-            organization_id, _, reviewer_id, ingested = await _seed(session)
+            organization_id, _, reviewer_id, ingested, config = await _seed(session)
             result = await submit_review_decision(
                 session, organization_id=organization_id,
                 document_pk=ingested.document_pk,
@@ -512,6 +700,7 @@ async def test_review_decision_trigger_blocks_owner_update_and_delete(
                 reviewer_principal_id=reviewer_id, decision="approve",
                 reason="Immutable fixture", request_id="immutable-decision",
                 idempotency_key="immutable-decision-key",
+                selected_configuration_id=config.id,
             )
             with pytest.raises(DBAPIError, match="document_review_decisions are immutable"):
                 async with session.begin_nested():
@@ -539,7 +728,7 @@ async def test_application_role_can_submit_but_cannot_update_or_delete_decision(
         transaction = await connection.begin()
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
-            organization_id, _, reviewer_id, ingested = await _seed(session)
+            organization_id, _, reviewer_id, ingested, config = await _seed(session)
             await connection.execute(text("SET LOCAL ROLE opsbrain_app"))
             assert await connection.scalar(text("SELECT current_user")) == "opsbrain_app"
 
@@ -550,6 +739,7 @@ async def test_application_role_can_submit_but_cannot_update_or_delete_decision(
                 reviewer_principal_id=reviewer_id, decision="approve",
                 reason="Application role review", request_id="app-role-review",
                 idempotency_key="app-role-review-key",
+                selected_configuration_id=config.id,
             )
             assert result.decision.id is not None
             assert await connection.scalar(text(
