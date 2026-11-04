@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -50,8 +50,12 @@ async def test_reindex_storage_enforces_state_scope_and_audit_fk(migration_datab
             item = ReindexJobItem(organization_id=organization_id, reindex_job_id=job.id, document_pk=created.document_pk, source_document_version_id=created.document_version_id, processing_status="queued")
             session.add(item)
             await session.flush()
-            attempt = ReindexJobItemAttempt(organization_id=organization_id, reindex_job_item_id=item.id, attempt_number=1, status="running", retryable=True)
+            started_at = datetime.now(timezone.utc)
+            attempt = ReindexJobItemAttempt(organization_id=organization_id, reindex_job_item_id=item.id, attempt_number=1, status="running", retryable=True, started_at=started_at, lease_expires_at=started_at + timedelta(seconds=60))
             session.add(attempt)
+            await session.flush()
+            item.processing_status = "running"
+            item.active_attempt_id = attempt.id
             event = AuditEvent(organization_id=organization_id, event_type="reindex.job.accepted", outcome="succeeded", actor_kind="principal", actor_principal_id=principal_id, request_id="req-1", reindex_job_id=job.id, details={}, occurred_at=datetime.now(timezone.utc))
             session.add_all([attempt, event])
             await session.flush()

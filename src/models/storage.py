@@ -492,10 +492,12 @@ class ReindexJobItem(Base):
     source_document_version_id = Column(PGUUID(as_uuid=True), nullable=False)
     output_derived_set_id = Column(PGUUID(as_uuid=True), nullable=True)
     processing_status = Column(Text, nullable=False)
+    active_attempt_id = Column(PGUUID(as_uuid=True), nullable=True)
     outcome = Column(Text, nullable=True)
     skip_code = Column(Text, nullable=True)
     error_code = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
+    next_retry_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)
@@ -507,12 +509,15 @@ class ReindexJobItem(Base):
         ForeignKeyConstraint(["organization_id", "document_pk"], ["documents.organization_id", "documents.id"], name="fk_reindex_job_items_document", ondelete="RESTRICT"),
         ForeignKeyConstraint(["organization_id", "document_pk", "source_document_version_id"], ["document_versions.organization_id", "document_versions.document_pk", "document_versions.id"], name="fk_reindex_job_items_source_version", ondelete="RESTRICT"),
         ForeignKeyConstraint(["organization_id", "source_document_version_id", "output_derived_set_id"], ["derived_sets.organization_id", "derived_sets.document_version_id", "derived_sets.id"], name="fk_reindex_job_items_output_derived_set", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["organization_id", "id", "active_attempt_id"], ["reindex_job_item_attempts.organization_id", "reindex_job_item_attempts.reindex_job_item_id", "reindex_job_item_attempts.id"], name="fk_reindex_job_items_active_attempt", ondelete="RESTRICT", use_alter=True),
         Index("ix_reindex_job_items_job_processing_status", "reindex_job_id", "processing_status"),
         CheckConstraint("processing_status IN ('queued', 'running', 'succeeded', 'failed')", name="processing_status_allowed"),
         CheckConstraint("outcome IS NULL OR outcome IN ('rebuilt', 'skipped', 'failed')", name="outcome_allowed"),
         CheckConstraint("skip_code IS NULL OR btrim(skip_code) <> ''", name="skip_code_not_blank_when_present"),
         CheckConstraint("error_code IS NULL OR btrim(error_code) <> ''", name="error_code_not_blank_when_present"),
         CheckConstraint("error_message IS NULL OR btrim(error_message) <> ''", name="error_message_not_blank_when_present"),
+        CheckConstraint("next_retry_at IS NULL OR processing_status = 'queued'", name="next_retry_requires_queued"),
+        CheckConstraint("(processing_status = 'running' AND active_attempt_id IS NOT NULL) OR (processing_status IN ('queued', 'succeeded', 'failed') AND active_attempt_id IS NULL)", name="active_attempt_matches_processing_status"),
         CheckConstraint("(processing_status IN ('queued', 'running') AND outcome IS NULL AND completed_at IS NULL) OR (processing_status = 'succeeded' AND outcome = 'rebuilt' AND output_derived_set_id IS NOT NULL AND completed_at IS NOT NULL) OR (processing_status = 'succeeded' AND outcome = 'skipped' AND skip_code IS NOT NULL AND output_derived_set_id IS NULL AND completed_at IS NOT NULL) OR (processing_status = 'failed' AND outcome = 'failed' AND error_code IS NOT NULL AND completed_at IS NOT NULL)", name="processing_state_consistent"),
     )
 
@@ -529,11 +534,18 @@ class ReindexJobItemAttempt(Base):
     error_code = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    lease_expires_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now() + interval '60 seconds'"))
     completed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     __table_args__ = (
         UniqueConstraint("organization_id", "reindex_job_item_id", "attempt_number"),
+        UniqueConstraint(
+            "organization_id",
+            "reindex_job_item_id",
+            "id",
+            name="uq_reindex_attempt_item_ref",
+        ),
         ForeignKeyConstraint(["organization_id", "reindex_job_item_id"], ["reindex_job_items.organization_id", "reindex_job_items.id"], name="fk_reindex_job_item_attempts_item", ondelete="RESTRICT"),
         CheckConstraint("attempt_number > 0", name="attempt_number_positive"),
         CheckConstraint("status IN ('running', 'succeeded', 'failed')", name="status_allowed"),
@@ -541,6 +553,8 @@ class ReindexJobItemAttempt(Base):
         CheckConstraint("error_message IS NULL OR btrim(error_message) <> ''", name="error_message_not_blank_when_present"),
         CheckConstraint("(status = 'running' AND completed_at IS NULL AND error_code IS NULL AND error_message IS NULL) OR (status = 'succeeded' AND completed_at IS NOT NULL AND retryable = false AND error_code IS NULL AND error_message IS NULL) OR (status = 'failed' AND completed_at IS NOT NULL AND error_code IS NOT NULL)", name="attempt_state_consistent"),
         CheckConstraint("completed_at IS NULL OR completed_at >= started_at", name="completion_not_before_start"),
+        CheckConstraint("lease_expires_at > started_at", name="lease_after_start"),
+        Index("uq_reindex_job_item_attempts_running_item", "organization_id", "reindex_job_item_id", unique=True, postgresql_where=text("status = 'running'")),
     )
 
 

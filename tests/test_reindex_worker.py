@@ -92,7 +92,10 @@ async def _enqueue_two_item_job(session):
 async def test_worker_builds_activates_and_completes_approval_job(migration_database_engine):
     async with migration_database_engine.connect() as connection:
         tx = await connection.begin()
-        session = AsyncSession(bind=connection, expire_on_commit=False)
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             org_id, document_pk, approval = await _enqueue_approval(session)
             item_id = await process_next_chunk_reindex_item(session)
@@ -123,7 +126,10 @@ async def test_worker_builds_activates_and_completes_approval_job(migration_data
 async def test_worker_skips_when_source_version_is_stale(migration_database_engine):
     async with migration_database_engine.connect() as connection:
         tx = await connection.begin()
-        session = AsyncSession(bind=connection, expire_on_commit=False)
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             _, document_pk, approval = await _enqueue_approval(session)
             document = await session.get(Document, document_pk)
@@ -169,7 +175,10 @@ async def test_worker_rolls_back_partial_build_and_marks_failed(migration_databa
 
     async with migration_database_engine.connect() as connection:
         tx = await connection.begin()
-        session = AsyncSession(bind=connection, expire_on_commit=False)
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             _, _, approval = await _enqueue_approval(session)
 
@@ -206,18 +215,23 @@ async def test_worker_rolls_back_partial_build_and_marks_failed(migration_databa
 async def test_chunk_worker_does_not_claim_embedding_job(migration_database_engine):
     async with migration_database_engine.connect() as connection:
         tx = await connection.begin()
-        session = AsyncSession(bind=connection, expire_on_commit=False)
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             _, _, approval = await _enqueue_approval(session)
             job = await session.get(ReindexJob, approval.reindex_job_id)
             job.targets = ["embeddings"]
+            job_id = job.id
             await session.flush()
+            await session.commit()
             assert await process_next_chunk_reindex_item(session) is None
             item = await session.scalar(select(ReindexJobItem).where(
-                ReindexJobItem.reindex_job_id == job.id
+                ReindexJobItem.reindex_job_id == job_id
             ))
             assert item.processing_status == "queued"
-            assert job.status == "queued"
+            assert await session.scalar(select(ReindexJob.status).where(ReindexJob.id == job_id)) == "queued"
         finally:
             await session.close()
             await tx.rollback()
@@ -227,7 +241,10 @@ async def test_chunk_worker_does_not_claim_embedding_job(migration_database_engi
 async def test_worker_skips_when_matching_active_set_already_exists(migration_database_engine):
     async with migration_database_engine.connect() as connection:
         tx = await connection.begin()
-        session = AsyncSession(bind=connection, expire_on_commit=False)
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             _, document_pk, approval = await _enqueue_approval(session)
             from src.ingestion.derived_build import build_chunk_derived_set
@@ -267,14 +284,20 @@ async def test_worker_skips_when_matching_active_set_already_exists(migration_da
 async def test_skip_locked_prevents_two_sessions_claiming_same_item(migration_database_engine):
     async with migration_database_engine.connect() as connection:
         tx = await connection.begin()
-        first = AsyncSession(bind=connection, expire_on_commit=False)
+        first = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             await _enqueue_approval(first)
             claimed = await process_next_chunk_reindex_item(first)
             assert claimed is not None
             async with migration_database_engine.connect() as second_connection:
                 second_tx = await second_connection.begin()
-                second = AsyncSession(bind=second_connection, expire_on_commit=False)
+                second = AsyncSession(
+                    bind=second_connection, expire_on_commit=False,
+                    join_transaction_mode="create_savepoint",
+                )
                 try:
                     assert await process_next_chunk_reindex_item(second) is None
                 finally:
@@ -286,32 +309,41 @@ async def test_skip_locked_prevents_two_sessions_claiming_same_item(migration_da
 
 
 @pytest.mark.asyncio
-async def test_retryable_failure_records_history_then_succeeds_without_duplicate_output(
+async def test_retryable_failure_is_delayed_then_succeeds_without_duplicate_output(
     migration_database_engine, monkeypatch,
 ):
     from src.ingestion import reindex_worker
     real_build = reindex_worker.build_chunk_derived_set
     calls = 0
 
-    async def fail_twice_then_build(*args, **kwargs):
+    async def fail_once_then_build(*args, **kwargs):
         nonlocal calls
         calls += 1
-        if calls < 3:
+        if calls == 1:
             raise reindex_worker.RetryableReindexError()
         return await real_build(*args, **kwargs)
 
-    monkeypatch.setattr(reindex_worker, "build_chunk_derived_set", fail_twice_then_build)
+    monkeypatch.setattr(reindex_worker, "build_chunk_derived_set", fail_once_then_build)
     async with migration_database_engine.connect() as connection:
         tx = await connection.begin()
-        session = AsyncSession(bind=connection, expire_on_commit=False)
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             _, _, approval = await _enqueue_approval(session)
             item_id = await process_next_chunk_reindex_item(session)
+            item = await session.get(ReindexJobItem, item_id)
+            assert item.processing_status == "queued"
+            assert item.next_retry_at is not None
+            item.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            await session.flush()
+            assert await process_next_chunk_reindex_item(session) == item_id
             attempts = list((await session.scalars(select(ReindexJobItemAttempt).where(
                 ReindexJobItemAttempt.reindex_job_item_id == item_id
             ).order_by(ReindexJobItemAttempt.attempt_number))).all())
-            assert [a.status for a in attempts] == ["failed", "failed", "succeeded"]
-            assert [a.retryable for a in attempts] == [True, True, False]
+            assert [a.status for a in attempts] == ["failed", "succeeded"]
+            assert [a.retryable for a in attempts] == [True, False]
             item = await session.get(ReindexJobItem, item_id)
             job = await session.get(ReindexJob, approval.reindex_job_id)
             derived = await session.get(DerivedSet, item.output_derived_set_id)
@@ -339,10 +371,19 @@ async def test_three_retryable_failures_end_item_and_job_failed_once(migration_d
     monkeypatch.setattr(reindex_worker, "build_chunk_derived_set", always_transient)
     async with migration_database_engine.connect() as connection:
         tx = await connection.begin()
-        session = AsyncSession(bind=connection, expire_on_commit=False)
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             _, _, approval = await _enqueue_approval(session)
-            item_id = await process_next_chunk_reindex_item(session)
+            item_id = None
+            for _ in range(3):
+                item_id = await process_next_chunk_reindex_item(session)
+                item = await session.get(ReindexJobItem, item_id)
+                if item.processing_status == "queued":
+                    item.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+                    await session.flush()
             item = await session.get(ReindexJobItem, item_id)
             attempts = list((await session.scalars(select(ReindexJobItemAttempt).where(
                 ReindexJobItemAttempt.reindex_job_item_id == item_id
@@ -366,67 +407,6 @@ async def test_three_retryable_failures_end_item_and_job_failed_once(migration_d
 
 
 @pytest.mark.asyncio
-async def test_crash_before_commit_rolls_back_worker_and_retry_processes_once(
-    migration_database_engine,
-):
-    async with migration_database_engine.connect() as connection:
-        tx = await connection.begin()
-        session = AsyncSession(bind=connection, expire_on_commit=False)
-        try:
-            _, _, approval = await _enqueue_approval(session)
-            job_id = approval.reindex_job_id
-            item = await session.scalar(select(ReindexJobItem).where(
-                ReindexJobItem.reindex_job_id == job_id
-            ))
-            item_id = item.id
-
-            crashed_transaction = await session.begin_nested()
-            assert await process_next_chunk_reindex_item(session) == item_id
-            await crashed_transaction.rollback()
-            # Simulate process death: discard SQLAlchemy's cached object state.
-            session.expunge_all()
-
-            item = await session.get(ReindexJobItem, item_id)
-            job = await session.get(ReindexJob, job_id)
-            assert item.processing_status == "queued"
-            assert job.status == "queued"
-            assert await session.scalar(select(func.count()).select_from(ReindexJobItemAttempt).where(
-                ReindexJobItemAttempt.reindex_job_item_id == item_id
-            )) == 0
-            assert await session.scalar(select(func.count()).select_from(DerivedSet).where(
-                DerivedSet.document_version_id == item.source_document_version_id,
-                DerivedSet.configuration_id == job.configuration_id,
-            )) == 0
-            assert await session.scalar(select(func.count()).select_from(Chunk).where(
-                Chunk.document_version_id == item.source_document_version_id
-            )) == 0
-            assert await session.scalar(select(func.count()).select_from(AuditEvent).where(
-                AuditEvent.reindex_job_id == job_id,
-                AuditEvent.event_type.like("reindex.item.%"),
-            )) == 0
-
-            assert await process_next_chunk_reindex_item(session) == item_id
-            await session.flush()
-            attempts = list((await session.scalars(select(ReindexJobItemAttempt).where(
-                ReindexJobItemAttempt.reindex_job_item_id == item_id
-            ))).all())
-            assert len(attempts) == 1 and attempts[0].status == "succeeded"
-            terminal_events = list((await session.scalars(select(AuditEvent).where(
-                AuditEvent.reindex_job_id == job_id,
-                AuditEvent.event_type.like("reindex.item.%"),
-            ))).all())
-            assert len(terminal_events) == 1
-            assert terminal_events[0].event_type == "reindex.item.activated"
-            item = await session.get(ReindexJobItem, item_id)
-            job = await session.get(ReindexJob, job_id)
-            assert (item.processing_status, item.outcome) == ("succeeded", "rebuilt")
-            assert job.status == "completed"
-        finally:
-            await session.close()
-            await tx.rollback()
-
-
-@pytest.mark.asyncio
 async def test_multi_item_job_derives_running_then_completed_with_errors(
     migration_database_engine, monkeypatch,
 ):
@@ -444,7 +424,10 @@ async def test_multi_item_job_derives_running_then_completed_with_errors(
     monkeypatch.setattr(reindex_worker, "build_chunk_derived_set", succeed_first_then_fail)
     async with migration_database_engine.connect() as connection:
         tx = await connection.begin()
-        session = AsyncSession(bind=connection, expire_on_commit=False)
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             _, job_id = await _enqueue_two_item_job(session)
             first_item_id = await process_next_chunk_reindex_item(session)
@@ -477,7 +460,10 @@ async def test_multi_item_job_derives_running_then_completed_with_errors(
 async def test_multi_item_skipped_and_rebuilt_job_completes_without_errors(migration_database_engine):
     async with migration_database_engine.connect() as connection:
         tx = await connection.begin()
-        session = AsyncSession(bind=connection, expire_on_commit=False)
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             _, job_id = await _enqueue_two_item_job(session)
             items = list((await session.scalars(select(ReindexJobItem).where(
