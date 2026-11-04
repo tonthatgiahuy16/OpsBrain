@@ -48,7 +48,7 @@ def test_audit_event_constraints_and_indexes_are_registered():
         "ck_audit_events_details_object",
         "ck_audit_events_trace_anchor_present",
         "ck_audit_events_document_version_requires_document",
-        "ck_audit_events_deferred_refs_null",
+        "ck_audit_events_reindex_job_deferred_null",
     } <= check_names
 
     foreign_key_names = {
@@ -61,6 +61,7 @@ def test_audit_event_constraints_and_indexes_are_registered():
         "fk_audit_events_document",
         "fk_audit_events_document_version",
         "fk_audit_events_ingestion_job",
+        "fk_audit_events_review_decision",
     } <= foreign_key_names
 
     unique_column_sets = {
