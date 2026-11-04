@@ -29,7 +29,24 @@ def test_reindex_job_metadata_enforces_contract_keys_states_and_indexes():
     assert ("organization_id", "reindex_job_id", "document_pk") in _unique_sets(item)
     assert ("organization_id", "id") in _unique_sets(item)
     assert ("organization_id", "reindex_job_item_id", "attempt_number") in _unique_sets(attempt)
+    assert ("organization_id", "reindex_job_item_id", "id") in _unique_sets(attempt)
 
-    assert {"ck_reindex_jobs_status_timestamps_consistent", "ck_reindex_jobs_targets_unique", "ck_reindex_job_items_processing_state_consistent", "ck_reindex_job_item_attempts_attempt_state_consistent"} <= (_names(job, CheckConstraint) | _names(item, CheckConstraint) | _names(attempt, CheckConstraint))
+    active_attempt_fk = {
+        constraint.name
+        for constraint in item.constraints
+        if isinstance(constraint, ForeignKeyConstraint)
+    }
+    assert "fk_reindex_job_items_active_attempt" in active_attempt_fk
+
+    assert {
+        "ck_reindex_jobs_status_timestamps_consistent",
+        "ck_reindex_jobs_targets_unique",
+        "ck_reindex_job_items_processing_state_consistent",
+        "ck_reindex_job_items_next_retry_requires_queued",
+        "ck_reindex_job_items_active_attempt_matches_processing_status",
+        "ck_reindex_job_item_attempts_attempt_state_consistent",
+        "ck_reindex_job_item_attempts_lease_after_start",
+    } <= (_names(job, CheckConstraint) | _names(item, CheckConstraint) | _names(attempt, CheckConstraint))
     assert {"ix_reindex_jobs_status_submitted_at"} <= {index.name for index in job.indexes}
     assert {"ix_reindex_job_items_job_processing_status"} <= {index.name for index in item.indexes}
+    assert {"uq_reindex_job_item_attempts_running_item"} <= {index.name for index in attempt.indexes}
