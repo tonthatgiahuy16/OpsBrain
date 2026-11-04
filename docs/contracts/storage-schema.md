@@ -1,8 +1,10 @@
 # OpsBrain Storage Schema Contract
 
 - **Status:** Accepted
-- **Contract version:** `1.1`
-- **Amendment:** `2026-10-23` — Cho phép phased audit foundation trước reindex job và review decision, nhưng không làm suy yếu append-only enforcement, organization isolation hoặc foreign-key integrity.
+- **Contract version:** `1.2`
+- **Amendments:**
+  - `2026-10-23` — Cho phép phased audit foundation trước reindex job và review decision, nhưng không làm suy yếu append-only enforcement, organization isolation hoặc foreign-key integrity.
+  - `2026-11-04` — Chốt reindex worker lease/retry protocol với persisted fencing token, delayed retry, reclaim và strict lease cutoff.
 
 - **Primary owner:** Backend and Data Engineering
 - **Reviewer:** Corpus and Evaluation
@@ -928,10 +930,12 @@ Rules:
 | `source_document_version_id` | `uuid` | Not null | Current version lúc job được nhận |
 | `output_derived_set_id` | `uuid` | Nullable | Derived set được build |
 | `processing_status` | `text` | Not null | Trạng thái xử lý |
+| `active_attempt_id` | `uuid` | Nullable | Attempt hiện được phép thực thi/finalize item |
 | `outcome` | `text` | Nullable cho tới khi terminal | Kết quả document |
 | `skip_code` | `text` | Nullable | Stable reason khi skip |
 | `error_code` | `text` | Nullable | Sanitized failure code |
 | `error_message` | `text` | Nullable | Sanitized failure message |
+| `next_retry_at` | `timestamptz` | Nullable | Thời điểm sớm nhất queued item được claim lại |
 | `created_at` | `timestamptz` | Not null | Thời điểm tạo |
 | `updated_at` | `timestamptz` | Not null | Thời điểm cập nhật |
 | `completed_at` | `timestamptz` | Nullable | Thời điểm item terminal |
@@ -940,10 +944,15 @@ Required constraints:
 
 - `UNIQUE (organization_id, reindex_job_id, document_pk)`.
 - `UNIQUE (organization_id, id)` để hỗ trợ composite foreign key từ item attempts.
+- Composite foreign key `(organization_id, id, active_attempt_id)` tham chiếu `(organization_id, reindex_job_item_id, id)` của `reindex_job_item_attempts`, bảo đảm active attempt thuộc đúng item và organization.
+- Check constraint: item `running` bắt buộc có `active_attempt_id`; item `queued`, `succeeded` hoặc `failed` bắt buộc có `active_attempt_id = NULL`.
+- Deferred constraint trigger tại commit bắt buộc running item trỏ tới đúng attempt `running`, và mọi attempt `running` phải là `active_attempt_id` của item đó.
 - Job, document và source version phải thuộc cùng organization.
 - Source version phải thuộc document được tham chiếu.
 - Output derived set, nếu có, phải thuộc đúng source document version và organization.
 - `processing_status` chỉ nhận `queued`, `running`, `succeeded` hoặc `failed`.
+- `next_retry_at IS NULL OR processing_status = 'queued'`.
+- Worker chỉ claim item khi `next_retry_at IS NULL OR next_retry_at <= now()`; claim phải xóa `next_retry_at` trong cùng transaction.
 - `outcome` chỉ nhận `rebuilt`, `skipped` hoặc `failed`.
 - `processing_status: succeeded` yêu cầu outcome là `rebuilt` hoặc `skipped`.
 - `processing_status: failed` yêu cầu `outcome: failed` và `error_code`.
@@ -964,7 +973,7 @@ Baseline skip codes gồm:
 
 | Column | Type | Constraint | Meaning |
 |---|---|---|---|
-| `id` | `uuid` | Primary key | Internal attempt key |
+| `id` | `uuid` | Primary key | Internal attempt key và persisted fencing token |
 | `organization_id` | `uuid` | Not null | Organization scope |
 | `reindex_job_item_id` | `uuid` | Not null | Item được xử lý hoặc retry |
 | `attempt_number` | `integer` | Not null, greater than zero | Số lần thử |
@@ -973,34 +982,43 @@ Baseline skip codes gồm:
 | `error_code` | `text` | Nullable | Sanitized failure code |
 | `error_message` | `text` | Nullable | Sanitized failure message |
 | `started_at` | `timestamptz` | Not null | Thời điểm bắt đầu |
+| `lease_expires_at` | `timestamptz` | Not null | Thời điểm lease của attempt hết hạn |
 | `completed_at` | `timestamptz` | Nullable | Thời điểm kết thúc |
 | `created_at` | `timestamptz` | Not null | Thời điểm tạo row |
 
 Required constraints:
 
 - `UNIQUE (organization_id, reindex_job_item_id, attempt_number)`.
+- `UNIQUE (organization_id, reindex_job_item_id, id)` để item có thể tham chiếu attempt đang sở hữu.
+- `lease_expires_at > started_at`.
+- Partial unique index `UNIQUE (organization_id, reindex_job_item_id) WHERE status = 'running'` giới hạn tối đa một running attempt trên mỗi item.
 - Job item phải thuộc cùng organization.
 - Attempt `running` yêu cầu `completed_at` là `null`.
 - Attempt terminal yêu cầu `completed_at`.
 - Attempt `failed` yêu cầu sanitized `error_code`.
 - Attempt `succeeded` yêu cầu `retryable = false` và không có error.
 - Retry tạo attempt mới; không ghi đè attempt cũ.
+- Attempt terminal là lịch sử bất biến; retry không cập nhật lại attempt terminal.
 - Retry không được tạo active derived set trùng.
+
+Baseline lease/retry policy: `max_attempts = 3`, `lease_seconds = 60`, `retry_delay_seconds = 30`. Heartbeat là optional và chưa triển khai.
 
 ### 12.5 Processing and activation rules
 
-1. Worker claim item bằng row lock để tránh hai worker xử lý cùng item đồng thời.
-2. Worker đọc đúng `source_document_version_id` đã snapshot.
-3. Worker tạo derived set mới ở trạng thái `pending`, sau đó chuyển sang `building`.
-4. Chunks, embeddings, full-text state và relationships được tạo trong derived set mới.
-5. Worker không sửa active derived set cũ trong lúc build.
-6. Sau khi build hoàn thành, worker khóa document và đọc lại current version, lifecycle, review state, temporal validity và ACL.
-7. Nếu current version đã đổi, item được `skipped` với code `source_version_changed`; set mới không được kích hoạt.
-8. Nếu document không còn retrieval-eligible, item được `skipped` với code `document_not_eligible`; active data không hợp lệ phải bị vô hiệu hóa.
-9. Nếu validation cuối cùng đạt, worker kích hoạt set mới và vô hiệu hóa set cũ trong cùng transaction.
-10. Chỉ sau activation thành công item mới có outcome `rebuilt`.
-11. Item failure không được làm derived set chưa hoàn tất trở thành active.
-12. Job terminal chỉ sau khi mọi item terminal hoặc job gặp system-level failure.
+1. Mỗi lần claim, worker mở Tx1 và chọn item queued đã đến hạn, thuộc job có target set được worker hỗ trợ, bằng `SELECT ... FOR UPDATE SKIP LOCKED`. Baseline hiện tại chỉ hỗ trợ chính xác `targets = ['chunks']`. Chọn và khóa item là điểm phân xử giữa các worker.
+2. Lock order cố định là item → job → current attempt (nếu có) → current document → active derived set liên quan. Nếu transaction khóa nhiều row cùng loại, thứ tự UUID tăng dần. Không giữ document lock trong khi chờ item lock.
+3. Trong Tx1, worker khóa item rồi job, kiểm tra item còn claimable và chưa đạt `max_attempts = 3`, tạo attempt `running` với `started_at = now()` và `lease_expires_at = started_at + 60 seconds`; cùng transaction, item thành `running`, `active_attempt_id = attempt.id`, `next_retry_at = NULL`, job thành `running` và `started_at` được đặt nếu chưa có.
+4. Tx1 commit trước khi bắt đầu build. Crash trước Tx1 commit rollback toàn bộ claim; item còn queued và attempt mới không tồn tại.
+5. Sau Tx1 commit, worker mở Tx2 cho business work. Worker đọc đúng `source_document_version_id` và `configuration_id` đã snapshot. Derived output được build inactive; chỉ kích hoạt sau validation cuối cùng.
+6. Trước bước activation cuối cùng, worker khóa item → job → attempt hiện hành theo lock order, xác nhận `item.active_attempt_id = attempt.id`, attempt còn `running` và `lease_expires_at > now()`. Đây là fencing check bằng persisted attempt ID; worker cũ không thể finalize sau khi item được gán attempt mới. Lease hết hạn là strict cutoff: worker không finalize dù reclaimer chưa chạy. Heartbeat optional, chưa triển khai; lease không tự gia hạn.
+7. Sau fencing check, trong cùng transaction cuối, worker khóa document rồi đọc lại current version, document/organization lifecycle, review state, temporal validity và authorization/ACL theo policy hiện hành. Nếu không còn eligible, worker rollback output build nếu cần, kết thúc item là skipped theo stable code, và không activate output. Đây là recheck bắt buộc ngay trước activation; snapshot lúc enqueue hoặc eligibility trước build không thay thế bước này.
+8. Thành công hoặc skip: transaction cuối cập nhật attempt thành terminal, xóa `active_attempt_id`, cập nhật item thành terminal `succeeded` với outcome `rebuilt` hoặc `skipped`, cập nhật output reference nếu rebuilt, derive job status từ persisted items và ghi đúng một terminal audit. Các thay đổi commit atomically.
+9. Lỗi retryable: rollback phần build để không giữ partial output. Một transaction trạng thái mới khóa item → job → current attempt theo lock order, xác nhận `active_attempt_id` vẫn bằng attempt ID vừa chạy; nếu attempt number < 3 thì attempt thành `failed`/`retryable = true`, xóa `active_attempt_id`, item về `queued`, `next_retry_at = now() + 30 seconds`. Job giữ `running` khi còn item chưa terminal. Transaction này không ghi terminal audit cho lần retry còn được phép.
+10. Nếu lỗi retryable xảy ra ở attempt thứ 3, transaction trạng thái ghi attempt `failed`/`retryable = false`, xóa `active_attempt_id`, item terminal `failed` và derive job status theo §12.6. Lỗi không retryable cũng rollback build, rồi ghi attempt/item failed terminal, derive job status và một `reindex.item.failed` audit với error code/message đã sanitize.
+11. Reclaimer chọn item có current attempt `running` với `lease_expires_at <= now()` bằng `FOR UPDATE SKIP LOCKED`, rồi khóa item → job → attempt theo lock order và kiểm tra lại `active_attempt_id` cùng lease dưới lock. Nếu chưa đạt 3 attempts, reclaimer đánh dấu attempt cũ failed/retryable, xóa `active_attempt_id` và đưa item về queued với `next_retry_at = now() + 30 seconds`; nếu đã đạt giới hạn thì kết thúc item/job failed. Reclaim để retry không tạo terminal audit.
+12. Crash sau Tx1 commit nhưng trước Tx2 commit giữ claim và running attempt cho tới khi lease hết hạn. Reclaimer thu hồi attempt; dữ liệu Tx2 chưa commit được PostgreSQL rollback.
+13. Crash sau transaction cuối commit nhưng trước acknowledgment để lại item/attempt terminal cùng output activation và terminal audit đã commit. Worker retry không claim item terminal nên không tạo output hoặc audit trùng.
+14. Job terminal chỉ sau khi mọi item terminal hoặc job gặp system-level failure. Item terminal, attempt terminal, job derivation, output activation, clear `active_attempt_id` và terminal audit phải thuộc cùng transaction cuối; không để item terminal trước khi business transaction commit.
 
 ### 12.6 Summary and status derivation
 
@@ -1467,13 +1485,18 @@ Pgvector access method, distance operator, vector dimension index và PostgreSQL
 ### 15.6 Transaction and worker requirements
 
 - Application transaction sử dụng PostgreSQL transaction thật; không giả lập atomicity bằng nhiều independent commits.
-- Worker claim dùng `SELECT ... FOR UPDATE SKIP LOCKED` hoặc cơ chế có tính chất tương đương.
-- Row lock phải có deterministic acquisition order khi transaction khóa nhiều document.
-- Job item chỉ terminal sau khi business transaction tương ứng đã commit.
-- Worker crash trước commit phải cho phép retry mà không tạo source version hoặc active derived set trùng.
-- Worker crash sau commit nhưng trước acknowledgment phải được xử lý bằng persisted idempotent state.
-- Database timeout hoặc serialization failure chỉ được retry khi operation được chứng minh idempotent.
-- Retry attempt phải được ghi lại thay vì ghi đè Evidence cũ.
+- Worker claim dùng `SELECT ... FOR UPDATE SKIP LOCKED`; claim và lease được commit trong Tx1 trước business work Tx2.
+- Worker chỉ claim target set mà implementation đó hỗ trợ; baseline chunk worker hỗ trợ chính xác `targets = ['chunks']`.
+- Lock order là item → job → current attempt → document → active derived set; nhiều row cùng loại khóa theo UUID tăng dần.
+- Deferred constraint trigger kiểm tra tại commit rằng running item và running attempt tham chiếu lẫn nhau qua `active_attempt_id`.
+- Mọi write/finalize sau Tx1 phải fence bằng `item.active_attempt_id = attempt.id`, attempt đang chạy và lease chưa hết hạn; lease hết hạn là strict cutoff kể cả trước reclaim.
+- Final eligibility/authorization/ACL phải được đọc lại sau build và ngay trước activation trong transaction cuối; eligibility trước build không đủ.
+- Partial output Tx2 phải rollback khi build/activation lỗi hoặc worker mất quyền sở hữu lease.
+- Terminal item, attempt, job derivation, activation và terminal audit commit atomically trong transaction terminal.
+- Crash trước Tx1 commit rollback claim; crash sau Tx1 nhưng trước Tx2 commit để reclaimer lấy lại sau lease; crash sau Tx2 commit nhưng trước acknowledgment được xử lý từ persisted terminal state.
+- Retryable failure rollback build Tx2 rồi dùng transaction riêng cập nhật attempt/item schedule; policy baseline là tối đa 3 attempts, lease 60 giây, delay 30 giây.
+- Reclaim attempt hết lease dùng `FOR UPDATE SKIP LOCKED`, kiểm tra lại lease dưới lock và tuân thủ cùng lock order.
+- Retry attempt được append; attempt terminal không bị ghi đè. Database timeout/serialization failure chỉ retry khi operation được chứng minh idempotent.
 
 ### 15.7 Required migration Evidence
 
