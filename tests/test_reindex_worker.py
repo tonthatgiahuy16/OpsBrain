@@ -125,6 +125,12 @@ async def test_worker_rolls_back_partial_build_and_marks_failed(migration_databa
             item = await session.get(ReindexJobItem, item_id)
             assert item.processing_status == "failed"
             assert item.error_code == "chunk_build_failed"
+            attempts = list((await session.scalars(select(ReindexJobItemAttempt).where(
+                ReindexJobItemAttempt.reindex_job_item_id == item_id
+            ))).all())
+            assert len(attempts) == 1
+            assert attempts[0].status == "failed"
+            assert attempts[0].retryable is False
             job = await session.get(ReindexJob, approval.reindex_job_id)
             assert job.status == "failed"
             assert await session.scalar(select(func.count()).select_from(DerivedSet)) == 0
@@ -220,4 +226,84 @@ async def test_skip_locked_prevents_two_sessions_claiming_same_item(migration_da
                     await second_tx.rollback()
         finally:
             await first.close()
+            await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_retryable_failure_records_history_then_succeeds_without_duplicate_output(
+    migration_database_engine, monkeypatch,
+):
+    from src.ingestion import reindex_worker
+    real_build = reindex_worker.build_chunk_derived_set
+    calls = 0
+
+    async def fail_twice_then_build(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise reindex_worker.RetryableReindexError()
+        return await real_build(*args, **kwargs)
+
+    monkeypatch.setattr(reindex_worker, "build_chunk_derived_set", fail_twice_then_build)
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            _, _, approval = await _enqueue_approval(session)
+            item_id = await process_next_chunk_reindex_item(session)
+            attempts = list((await session.scalars(select(ReindexJobItemAttempt).where(
+                ReindexJobItemAttempt.reindex_job_item_id == item_id
+            ).order_by(ReindexJobItemAttempt.attempt_number))).all())
+            assert [a.status for a in attempts] == ["failed", "failed", "succeeded"]
+            assert [a.retryable for a in attempts] == [True, True, False]
+            item = await session.get(ReindexJobItem, item_id)
+            job = await session.get(ReindexJob, approval.reindex_job_id)
+            derived = await session.get(DerivedSet, item.output_derived_set_id)
+            assert (item.processing_status, item.outcome) == ("succeeded", "rebuilt")
+            assert derived.is_active is True
+            assert job.status == "completed"
+            assert await session.scalar(select(func.count()).select_from(AuditEvent).where(
+                AuditEvent.reindex_job_id == approval.reindex_job_id,
+                AuditEvent.event_type == "reindex.item.activated",
+            )) == 1
+            assert await session.scalar(select(func.count()).select_from(DerivedSet)) == 1
+            assert await session.scalar(select(func.count()).select_from(Chunk)) > 0
+        finally:
+            await session.close()
+            await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_three_retryable_failures_end_item_and_job_failed_once(migration_database_engine, monkeypatch):
+    from src.ingestion import reindex_worker
+
+    async def always_transient(*args, **kwargs):
+        raise reindex_worker.RetryableReindexError()
+
+    monkeypatch.setattr(reindex_worker, "build_chunk_derived_set", always_transient)
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            _, _, approval = await _enqueue_approval(session)
+            item_id = await process_next_chunk_reindex_item(session)
+            item = await session.get(ReindexJobItem, item_id)
+            attempts = list((await session.scalars(select(ReindexJobItemAttempt).where(
+                ReindexJobItemAttempt.reindex_job_item_id == item_id
+            ).order_by(ReindexJobItemAttempt.attempt_number))).all())
+            job = await session.get(ReindexJob, approval.reindex_job_id)
+            assert len(attempts) == 3
+            assert [attempt.status for attempt in attempts] == ["failed", "failed", "failed"]
+            assert [a.retryable for a in attempts] == [True, True, False]
+            assert attempts[-1].status == "failed"
+            assert item.processing_status == "failed" and item.outcome == "failed"
+            assert item.error_code == "transient_chunk_build_failure"
+            assert job.status == "failed"
+            assert await session.scalar(select(func.count()).select_from(DerivedSet)) == 0
+            assert await session.scalar(select(func.count()).select_from(AuditEvent).where(
+                AuditEvent.reindex_job_id == job.id,
+                AuditEvent.event_type == "reindex.item.failed",
+            )) == 1
+        finally:
+            await session.close()
             await tx.rollback()
