@@ -307,3 +307,64 @@ async def test_three_retryable_failures_end_item_and_job_failed_once(migration_d
         finally:
             await session.close()
             await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_crash_before_commit_rolls_back_worker_and_retry_processes_once(
+    migration_database_engine,
+):
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            _, _, approval = await _enqueue_approval(session)
+            job_id = approval.reindex_job_id
+            item = await session.scalar(select(ReindexJobItem).where(
+                ReindexJobItem.reindex_job_id == job_id
+            ))
+            item_id = item.id
+
+            crashed_transaction = await session.begin_nested()
+            assert await process_next_chunk_reindex_item(session) == item_id
+            await crashed_transaction.rollback()
+            # Simulate process death: discard SQLAlchemy's cached object state.
+            session.expunge_all()
+
+            item = await session.get(ReindexJobItem, item_id)
+            job = await session.get(ReindexJob, job_id)
+            assert item.processing_status == "queued"
+            assert job.status == "queued"
+            assert await session.scalar(select(func.count()).select_from(ReindexJobItemAttempt).where(
+                ReindexJobItemAttempt.reindex_job_item_id == item_id
+            )) == 0
+            assert await session.scalar(select(func.count()).select_from(DerivedSet).where(
+                DerivedSet.document_version_id == item.source_document_version_id,
+                DerivedSet.configuration_id == job.configuration_id,
+            )) == 0
+            assert await session.scalar(select(func.count()).select_from(Chunk).where(
+                Chunk.document_version_id == item.source_document_version_id
+            )) == 0
+            assert await session.scalar(select(func.count()).select_from(AuditEvent).where(
+                AuditEvent.reindex_job_id == job_id,
+                AuditEvent.event_type.like("reindex.item.%"),
+            )) == 0
+
+            assert await process_next_chunk_reindex_item(session) == item_id
+            await session.flush()
+            attempts = list((await session.scalars(select(ReindexJobItemAttempt).where(
+                ReindexJobItemAttempt.reindex_job_item_id == item_id
+            ))).all())
+            assert len(attempts) == 1 and attempts[0].status == "succeeded"
+            terminal_events = list((await session.scalars(select(AuditEvent).where(
+                AuditEvent.reindex_job_id == job_id,
+                AuditEvent.event_type.like("reindex.item.%"),
+            ))).all())
+            assert len(terminal_events) == 1
+            assert terminal_events[0].event_type == "reindex.item.activated"
+            item = await session.get(ReindexJobItem, item_id)
+            job = await session.get(ReindexJob, job_id)
+            assert (item.processing_status, item.outcome) == ("succeeded", "rebuilt")
+            assert job.status == "completed"
+        finally:
+            await session.close()
+            await tx.rollback()
