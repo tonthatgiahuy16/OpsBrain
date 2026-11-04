@@ -15,6 +15,10 @@ from src.models.storage import (
 )
 
 
+class RetryableReindexError(Exception):
+    """Signals a transient failure safe to retry immediately."""
+
+
 async def process_next_chunk_reindex_item(session: AsyncSession) -> UUID | None:
     """Claim and process at most one queued item in the caller transaction."""
     now = datetime.now(timezone.utc)
@@ -43,85 +47,91 @@ async def process_next_chunk_reindex_item(session: AsyncSession) -> UUID | None:
         job.started_at = job.started_at or now
         item.processing_status = "running"
         item.updated_at = now
-        attempt_number = (await session.scalar(select(func.max(
-            ReindexJobItemAttempt.attempt_number
-        )).where(
-            ReindexJobItemAttempt.organization_id == item.organization_id,
-            ReindexJobItemAttempt.reindex_job_item_id == item.id,
-        )) or 0) + 1
-        attempt = ReindexJobItemAttempt(
-            organization_id=item.organization_id,
-            reindex_job_item_id=item.id,
-            attempt_number=attempt_number, status="running", retryable=False,
-            started_at=now,
-        )
-        session.add(attempt)
-        await session.flush()
-
         outcome = "rebuilt"
         skip_code = None
         derived_set = None
-        try:
-            async with session.begin_nested():
-                organization = await session.scalar(select(Organization).where(
-                    Organization.id == item.organization_id
-                ))
-                document = await session.scalar(select(Document).where(
-                    Document.organization_id == item.organization_id,
-                    Document.id == item.document_pk,
-                ).with_for_update())
-                version = await session.scalar(select(DocumentVersion).where(
-                    DocumentVersion.organization_id == item.organization_id,
-                    DocumentVersion.document_pk == item.document_pk,
-                    DocumentVersion.id == item.source_document_version_id,
-                ))
-                configuration = await session.scalar(select(DerivedConfiguration).where(
-                    DerivedConfiguration.organization_id == item.organization_id,
-                    DerivedConfiguration.id == job.configuration_id,
-                ))
-                if document is None or document.current_version_id != item.source_document_version_id:
-                    outcome, skip_code = "skipped", "source_version_changed"
-                elif not is_pre_acl_retrieval_eligible(organization, document, version, now):
-                    outcome, skip_code = "skipped", "document_not_eligible"
-                elif configuration is None or configuration.status != "active":
-                    outcome, skip_code = "skipped", "configuration_not_applicable"
-                else:
-                    current_active_set = await session.scalar(select(DerivedSet.id).where(
-                        DerivedSet.organization_id == item.organization_id,
-                        DerivedSet.document_version_id == item.source_document_version_id,
-                        DerivedSet.configuration_id == job.configuration_id,
-                        DerivedSet.status == "ready",
-                        DerivedSet.is_active.is_(True),
+        terminal_error = None
+        for attempt_number in range(1, 4):
+            attempt = ReindexJobItemAttempt(
+                organization_id=item.organization_id,
+                reindex_job_item_id=item.id,
+                attempt_number=attempt_number, status="running", retryable=False,
+                started_at=datetime.now(timezone.utc),
+            )
+            session.add(attempt)
+            await session.flush()
+            try:
+                async with session.begin_nested():
+                    organization = await session.scalar(select(Organization).where(
+                        Organization.id == item.organization_id
                     ))
-                    if current_active_set is not None:
-                        outcome, skip_code = "skipped", "already_current"
+                    document = await session.scalar(select(Document).where(
+                        Document.organization_id == item.organization_id,
+                        Document.id == item.document_pk,
+                    ).with_for_update())
+                    version = await session.scalar(select(DocumentVersion).where(
+                        DocumentVersion.organization_id == item.organization_id,
+                        DocumentVersion.document_pk == item.document_pk,
+                        DocumentVersion.id == item.source_document_version_id,
+                    ))
+                    configuration = await session.scalar(select(DerivedConfiguration).where(
+                        DerivedConfiguration.organization_id == item.organization_id,
+                        DerivedConfiguration.id == job.configuration_id,
+                    ))
+                    if document is None or document.current_version_id != item.source_document_version_id:
+                        outcome, skip_code = "skipped", "source_version_changed"
+                    elif not is_pre_acl_retrieval_eligible(organization, document, version, now):
+                        outcome, skip_code = "skipped", "document_not_eligible"
+                    elif configuration is None or configuration.status != "active":
+                        outcome, skip_code = "skipped", "configuration_not_applicable"
                     else:
-                        derived_set = await build_chunk_derived_set(
-                            session, organization_id=item.organization_id,
-                            document_pk=item.document_pk,
-                            document_version_id=item.source_document_version_id,
-                            configuration_id=job.configuration_id,
-                        )
-                        await activate_derived_set(
-                            session, organization_id=item.organization_id,
-                            derived_set_id=derived_set.id,
-                        )
-        except Exception as exc:
-            # Build/activation savepoint has rolled back. Persist only a safe,
-            # stable code; never store exception text, paths, or stack traces.
-            attempt.status = "failed"
-            attempt.retryable = False
-            attempt.error_code = "chunk_build_failed"
-            attempt.completed_at = datetime.now(timezone.utc)
+                        current_active_set = await session.scalar(select(DerivedSet.id).where(
+                            DerivedSet.organization_id == item.organization_id,
+                            DerivedSet.document_version_id == item.source_document_version_id,
+                            DerivedSet.configuration_id == job.configuration_id,
+                            DerivedSet.status == "ready",
+                            DerivedSet.is_active.is_(True),
+                        ))
+                        if current_active_set is not None:
+                            outcome, skip_code = "skipped", "already_current"
+                        else:
+                            derived_set = await build_chunk_derived_set(
+                                session, organization_id=item.organization_id,
+                                document_pk=item.document_pk,
+                                document_version_id=item.source_document_version_id,
+                                configuration_id=job.configuration_id,
+                            )
+                            await activate_derived_set(
+                                session, organization_id=item.organization_id,
+                                derived_set_id=derived_set.id,
+                            )
+            except RetryableReindexError:
+                attempt.status = "failed"
+                attempt.retryable = attempt_number < 3
+                attempt.error_code = "transient_chunk_build_failure"
+                attempt.completed_at = datetime.now(timezone.utc)
+                if attempt_number < 3:
+                    continue
+                terminal_error = "transient_chunk_build_failure"
+            except Exception:
+                attempt.status = "failed"
+                attempt.retryable = False
+                attempt.error_code = "chunk_build_failed"
+                attempt.completed_at = datetime.now(timezone.utc)
+                terminal_error = "chunk_build_failed"
+            else:
+                attempt.status = "succeeded"
+                attempt.retryable = False
+                attempt.completed_at = datetime.now(timezone.utc)
+            break
+
+        if terminal_error is not None:
             item.processing_status = "failed"
             item.outcome = "failed"
-            item.error_code = "chunk_build_failed"
-            item.completed_at = attempt.completed_at
+            item.error_code = terminal_error
+            item.completed_at = datetime.now(timezone.utc)
             event_type = "reindex.item.failed"
         else:
-            attempt.status = "succeeded"
-            attempt.retryable = False
-            attempt.completed_at = datetime.now(timezone.utc)
             item.processing_status = "succeeded"
             item.outcome = outcome
             item.skip_code = skip_code
