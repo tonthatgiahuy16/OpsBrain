@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from src.ingestion.eligibility import is_pre_acl_retrieval_eligible
 
 from src.ingestion.canonicalization import normalize_markdown_body
 from src.models.storage import (
@@ -21,7 +22,11 @@ from src.models.storage import (
     Document,
     DocumentReviewDecision,
     DocumentVersion,
+    DerivedConfiguration,
+    Organization,
     Principal,
+    ReindexJob,
+    ReindexJobItem,
 )
 
 
@@ -33,6 +38,7 @@ class ReviewResult:
     decision: DocumentReviewDecision
     resulting_version: DocumentVersion
     replayed: bool
+    reindex_job_id: UUID | None = None
 
 
 def _sha256(value: bytes) -> str:
@@ -48,6 +54,19 @@ def _payload_hash(
         "expected_version_id": str(expected_version_id),
         "decision": decision,
         "reason": reason,
+    }
+    serialized = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return _sha256(serialized.encode("utf-8"))
+
+
+def _reindex_payload_hash(*, document_id: str) -> str:
+    payload = {
+        "scope_type": "documents",
+        "document_ids": [document_id],
+        "targets": ["chunks"],
+        "reason": "review_approved",
     }
     serialized = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -82,7 +101,12 @@ async def _find_idempotent_result(
     )
     if version is None:
         raise RuntimeError("review result version is missing")
-    return ReviewResult(existing, version, True)
+    job = await session.scalar(select(AuditEvent.reindex_job_id).where(
+        AuditEvent.organization_id == organization_id,
+        AuditEvent.review_decision_id == existing.id,
+        AuditEvent.event_type == "reindex.job.accepted",
+    )) if existing.decision == "approve" else None
+    return ReviewResult(existing, version, True, job)
 
 
 async def _append_review_audit(
@@ -122,6 +146,7 @@ async def submit_review_decision(
     request_id: str,
     idempotency_key: str,
     correlation_id: str | None = None,
+    selected_configuration_id: UUID | None = None,
 ) -> ReviewResult:
     """Persist review version, decision, invalidation and audit atomically.
 
@@ -242,6 +267,22 @@ async def submit_review_decision(
         session.add(resulting)
         await session.flush()
 
+        organization = await session.scalar(select(Organization).where(
+            Organization.id == organization_id
+        ).with_for_update(read=True))
+        eligible = is_pre_acl_retrieval_eligible(organization, document, resulting, now)
+        selected_configuration = None
+        if decision == "approve" and eligible:
+            if selected_configuration_id is None:
+                raise ValueError("selected configuration is required for eligible approval")
+            selected_configuration = await session.scalar(select(DerivedConfiguration).where(
+                DerivedConfiguration.organization_id == organization_id,
+                DerivedConfiguration.id == selected_configuration_id,
+                DerivedConfiguration.status == "active",
+            ))
+            if selected_configuration is None:
+                raise ValueError("active configuration not found")
+
         decision_row = DocumentReviewDecision(
             id=uuid4(), organization_id=organization_id,
             request_id=request_id, idempotency_key_hash=key_hash,
@@ -251,6 +292,40 @@ async def submit_review_decision(
             reviewer_principal_id=reviewer_principal_id, decided_at=now,
         )
         session.add(decision_row)
+        reindex_job = None
+        if decision == "approve" and eligible:
+            reindex_job = ReindexJob(
+                organization_id=organization_id, request_id=request_id,
+                idempotency_key_hash=_sha256(
+                    f"review-reindex:{decision_row.id}".encode("utf-8")
+                ),
+                request_payload_hash=_reindex_payload_hash(
+                    document_id=document.document_id,
+                ),
+                submitted_by_principal_id=reviewer_principal_id,
+                scope_type="documents", targets=["chunks"], reason="review_approved",
+                configuration_id=selected_configuration.id,
+                requested_document_count=1, status="queued",
+            )
+            session.add(reindex_job)
+            await session.flush()
+            session.add(ReindexJobItem(
+                organization_id=organization_id, reindex_job_id=reindex_job.id,
+                document_pk=document_pk,
+                source_document_version_id=resulting.id,
+                processing_status="queued",
+            ))
+            await session.flush()
+            session.add(AuditEvent(
+                organization_id=organization_id,
+                event_type="reindex.job.accepted", outcome="succeeded",
+                actor_kind="principal", actor_principal_id=reviewer_principal_id,
+                request_id=request_id, correlation_id=correlation_id,
+                document_pk=document_pk, document_version_id=resulting.id,
+                reindex_job_id=reindex_job.id, review_decision_id=decision_row.id,
+                details={"configuration_id": str(selected_configuration.id)},
+                occurred_at=now,
+            ))
         document.current_version_id = resulting.id
         await session.execute(
             update(DerivedSet)
@@ -270,4 +345,4 @@ async def submit_review_decision(
             decision=decision, occurred_at=now,
         )
 
-    return ReviewResult(decision_row, resulting, False)
+    return ReviewResult(decision_row, resulting, False, reindex_job.id if reindex_job else None)

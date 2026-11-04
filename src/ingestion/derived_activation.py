@@ -12,6 +12,7 @@ from src.models.storage import (
     DocumentVersion,
     Organization,
 )
+from src.ingestion.eligibility import is_pre_acl_retrieval_eligible
 
 
 async def activate_derived_set(
@@ -71,18 +72,8 @@ async def activate_derived_set(
             )
         )
         now = datetime.now(timezone.utc)
-        if (
-            source_version is None
-            or source_version.document_status != "active"
-            or source_version.review_state != "approved"
-            or (
-                source_version.effective_from is not None
-                and source_version.effective_from > now
-            )
-            or (
-                source_version.effective_until is not None
-                and source_version.effective_until <= now
-            )
+        if not is_pre_acl_retrieval_eligible(
+            organization, document, source_version, now
         ):
             raise ValueError("source document is not retrieval-eligible")
 
