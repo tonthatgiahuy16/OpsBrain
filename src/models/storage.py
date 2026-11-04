@@ -496,6 +496,12 @@ class AuditEvent(Base):
             name="fk_audit_events_ingestion_job",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["organization_id", "review_decision_id"],
+            ["document_review_decisions.organization_id", "document_review_decisions.id"],
+            name="fk_audit_events_review_decision",
+            ondelete="RESTRICT",
+        ),
         Index(
             "ix_audit_events_org_occurred_at",
             "organization_id",
@@ -577,9 +583,68 @@ class AuditEvent(Base):
             name="document_version_requires_document",
         ),
         CheckConstraint(
-            "reindex_job_id IS NULL AND review_decision_id IS NULL",
-            name="deferred_refs_null",
+            "reindex_job_id IS NULL",
+            name="reindex_job_deferred_null",
         ),
+    )
+
+
+class DocumentReviewDecision(Base):
+    __tablename__ = "document_review_decisions"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    request_id = Column(Text, nullable=False)
+    idempotency_key_hash = Column(Text, nullable=False)
+    request_payload_hash = Column(Text, nullable=False)
+    document_pk = Column(PGUUID(as_uuid=True), nullable=False)
+    reviewed_version_id = Column(PGUUID(as_uuid=True), nullable=False)
+    resulting_version_id = Column(PGUUID(as_uuid=True), nullable=False)
+    decision = Column(Text, nullable=False)
+    reason = Column(Text, nullable=False)
+    reviewer_principal_id = Column(PGUUID(as_uuid=True), nullable=False)
+    decided_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id"),
+        UniqueConstraint(
+            "organization_id", "reviewer_principal_id", "idempotency_key_hash",
+            name="uq_document_review_decisions_idempotency",
+        ),
+        UniqueConstraint(
+            "organization_id", "resulting_version_id", name="uq_document_review_decisions_resulting_version",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "document_pk"],
+            ["documents.organization_id", "documents.id"],
+            name="fk_document_review_decisions_document",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "document_pk", "reviewed_version_id"],
+            ["document_versions.organization_id", "document_versions.document_pk", "document_versions.id"],
+            name="fk_document_review_decisions_reviewed_version",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "document_pk", "resulting_version_id"],
+            ["document_versions.organization_id", "document_versions.document_pk", "document_versions.id"],
+            name="fk_document_review_decisions_resulting_version",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "reviewer_principal_id"],
+            ["principals.organization_id", "principals.id"],
+            name="fk_document_review_decisions_reviewer",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("decision IN ('approve', 'reject')", name="decision_allowed"),
+        CheckConstraint("btrim(request_id) <> ''", name="request_id_not_blank"),
+        CheckConstraint("btrim(reason) <> ''", name="reason_not_blank"),
+        CheckConstraint("idempotency_key_hash ~ '^[0-9a-f]{64}$'", name="idempotency_key_hash_sha256_hex"),
+        CheckConstraint("request_payload_hash ~ '^[0-9a-f]{64}$'", name="request_payload_hash_sha256_hex"),
+        Index("ix_document_review_decisions_org_document", "organization_id", "document_pk", "decided_at"),
     )
 
 
