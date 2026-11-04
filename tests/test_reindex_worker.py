@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -6,9 +7,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.ingestion.review import submit_review_decision
+from src.ingestion.frontmatter import validate_markdown_document
+from src.ingestion.lifecycle import ingest_validated_document
 from src.ingestion.reindex_worker import process_next_chunk_reindex_item
 from src.models.storage import (
-    AuditEvent, Chunk, DerivedSet, Document, DocumentVersion, ReindexJob,
+    AuditEvent, Chunk, DerivedConfiguration, DerivedSet, Document, DocumentVersion, ReindexJob,
     ReindexJobItem, ReindexJobItemAttempt,
 )
 from tests.test_document_review_decisions import _seed
@@ -30,6 +33,59 @@ async def _enqueue_approval(session):
         selected_configuration_id=configuration.id,
     )
     return organization_id, ingested.document_pk, result
+
+
+async def _enqueue_two_item_job(session):
+    org_id, _, first_approval = await _enqueue_approval(session)
+    reviewer_id = first_approval.decision.reviewer_principal_id
+    config_id = (await session.get(ReindexJob, first_approval.reindex_job_id)).configuration_id
+    config = await session.get(DerivedConfiguration, config_id)
+    second_path = Path(__file__).parents[1] / "data" / "sample-vault" / "payment-service" / "services" / "checkout-service.md"
+    parsed = validate_markdown_document(second_path.read_text(encoding="utf-8"), source_uri=second_path.as_uri())
+    source = parsed.model_copy(update={"frontmatter": parsed.frontmatter.model_copy(update={"review_state": "in_review"})})
+    author_id = await session.scalar(select(DocumentVersion.created_by_principal_id).where(
+        DocumentVersion.id == first_approval.decision.reviewed_version_id
+    ))
+    second_ingested = await ingest_validated_document(
+        session, organization_id=org_id,
+        actor_principal_id=author_id,
+        document=source,
+    )
+    # The first version's author is the independent reviewer for this fixture.
+    second_result = await submit_review_decision(
+        session, organization_id=org_id, document_pk=second_ingested.document_pk,
+        expected_version_id=second_ingested.document_version_id,
+        reviewer_principal_id=reviewer_id, decision="approve", reason="Approved",
+        request_id=f"multi-{uuid4()}", idempotency_key=f"multi-key-{uuid4()}",
+        selected_configuration_id=config.id,
+    )
+    original_job = await session.get(ReindexJob, first_approval.reindex_job_id)
+    original_item = await session.scalar(select(ReindexJobItem).where(
+        ReindexJobItem.reindex_job_id == original_job.id
+    ))
+    original_job.requested_document_count = 2
+    original_item.created_at = datetime.now(timezone.utc)
+    session.add(ReindexJobItem(
+        organization_id=org_id, reindex_job_id=original_job.id,
+        document_pk=second_ingested.document_pk,
+        source_document_version_id=second_result.resulting_version.id,
+        processing_status="queued",
+        created_at=original_item.created_at + timedelta(seconds=1),
+    ))
+    await session.flush()
+    # Remove the second approval's own queued work; only the two-item fixture job remains.
+    second_job = await session.get(ReindexJob, second_result.reindex_job_id)
+    second_job.status = "failed"
+    second_job.started_at = datetime.now(timezone.utc)
+    second_job.completed_at = datetime.now(timezone.utc)
+    second_item = await session.scalar(select(ReindexJobItem).where(
+        ReindexJobItem.reindex_job_id == second_job.id
+    ))
+    second_item.processing_status = "failed"
+    second_item.outcome = "failed"
+    second_item.error_code = "fixture_superseded"
+    second_item.completed_at = datetime.now(timezone.utc)
+    return org_id, original_job.id
 
 
 @pytest.mark.asyncio
@@ -365,6 +421,102 @@ async def test_crash_before_commit_rolls_back_worker_and_retry_processes_once(
             job = await session.get(ReindexJob, job_id)
             assert (item.processing_status, item.outcome) == ("succeeded", "rebuilt")
             assert job.status == "completed"
+        finally:
+            await session.close()
+            await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_multi_item_job_derives_running_then_completed_with_errors(
+    migration_database_engine, monkeypatch,
+):
+    from src.ingestion import reindex_worker
+    real_build = reindex_worker.build_chunk_derived_set
+    calls = 0
+
+    async def succeed_first_then_fail(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("fixture build failure")
+        return await real_build(*args, **kwargs)
+
+    monkeypatch.setattr(reindex_worker, "build_chunk_derived_set", succeed_first_then_fail)
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            _, job_id = await _enqueue_two_item_job(session)
+            first_item_id = await process_next_chunk_reindex_item(session)
+            job = await session.get(ReindexJob, job_id)
+            assert job.status == "running" and job.completed_at is None
+            first_item = await session.get(ReindexJobItem, first_item_id)
+            assert (first_item.outcome, first_item.processing_status) == ("rebuilt", "succeeded")
+
+            second_item_id = await process_next_chunk_reindex_item(session)
+            second_item = await session.get(ReindexJobItem, second_item_id)
+            await session.refresh(job)
+            assert second_item.outcome == "failed"
+            assert job.status == "completed_with_errors"
+            assert job.completed_at is not None
+            events = list((await session.scalars(select(AuditEvent).where(
+                AuditEvent.reindex_job_id == job_id,
+                AuditEvent.event_type.in_(["reindex.item.activated", "reindex.item.failed", "reindex.item.skipped"]),
+            ))).all())
+            assert len(events) == 2
+            assert len({event.details["item_id"] for event in events}) == 2
+            assert await session.scalar(select(func.count()).select_from(DerivedSet).where(
+                DerivedSet.is_active.is_(True),
+            )) == 1
+        finally:
+            await session.close()
+            await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_multi_item_skipped_and_rebuilt_job_completes_without_errors(migration_database_engine):
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            _, job_id = await _enqueue_two_item_job(session)
+            items = list((await session.scalars(select(ReindexJobItem).where(
+                ReindexJobItem.reindex_job_id == job_id
+            ).order_by(ReindexJobItem.created_at))).all())
+            from src.ingestion.derived_activation import activate_derived_set
+            from src.ingestion.derived_build import build_chunk_derived_set
+
+            job = await session.get(ReindexJob, job_id)
+            existing = await build_chunk_derived_set(
+                session,
+                organization_id=job.organization_id,
+                document_pk=items[0].document_pk,
+                document_version_id=items[0].source_document_version_id,
+                configuration_id=job.configuration_id,
+            )
+            await activate_derived_set(
+                session,
+                organization_id=job.organization_id,
+                derived_set_id=existing.id,
+            )
+
+            first_id = await process_next_chunk_reindex_item(session)
+            first = await session.get(ReindexJobItem, first_id)
+            job = await session.get(ReindexJob, job_id)
+            assert first.outcome == "skipped"
+            assert first.skip_code == "already_current"
+            assert job.status == "running" and job.completed_at is None
+            second_id = await process_next_chunk_reindex_item(session)
+            second = await session.get(ReindexJobItem, second_id)
+            await session.refresh(job)
+            assert second.outcome == "rebuilt"
+            assert job.status == "completed" and job.completed_at is not None
+            events = list((await session.scalars(select(AuditEvent).where(
+                AuditEvent.reindex_job_id == job_id,
+                AuditEvent.event_type.in_(["reindex.item.activated", "reindex.item.failed", "reindex.item.skipped"]),
+            ))).all())
+            assert len(events) == 2
+            assert len({event.details["item_id"] for event in events}) == 2
         finally:
             await session.close()
             await tx.rollback()
