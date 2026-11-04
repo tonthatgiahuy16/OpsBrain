@@ -1,8 +1,10 @@
 from pathlib import Path
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.ingestion.frontmatter import validate_markdown_document
@@ -57,6 +59,51 @@ async def _seed(session: AsyncSession):
         actor_principal_id=author_id, document=source,
     )
     return organization_id, author_id, reviewer_id, ingested
+
+
+def _make_child_version(
+    parent: DocumentVersion,
+    *,
+    created_by_principal_id,
+    review_state: str,
+    change_kind: str = "review_transition",
+) -> DocumentVersion:
+    values = {
+        column.key: getattr(parent, column.key)
+        for column in DocumentVersion.__table__.columns
+        if column.key not in {"id", "created_at", "version_number", "parent_version_id"}
+    }
+    values.update({
+        "id": uuid4(),
+        "version_number": parent.version_number + 1,
+        "parent_version_id": parent.id,
+        "review_state": review_state,
+        "change_kind": change_kind,
+        "created_by_principal_id": created_by_principal_id,
+        "frontmatter_snapshot": {
+            **parent.frontmatter_snapshot, "review_state": review_state
+        },
+    })
+    return DocumentVersion(**values)
+
+
+def _review_decision_row(
+    *, organization_id, document_pk, reviewed_version_id,
+    resulting_version_id, reviewer_principal_id, decision="approve",
+) -> DocumentReviewDecision:
+    return DocumentReviewDecision(
+        organization_id=organization_id,
+        request_id=f"db-enforcement-{uuid4()}",
+        idempotency_key_hash="a" * 64,
+        request_payload_hash="b" * 64,
+        document_pk=document_pk,
+        reviewed_version_id=reviewed_version_id,
+        resulting_version_id=resulting_version_id,
+        decision=decision,
+        reason="database enforcement fixture",
+        reviewer_principal_id=reviewer_principal_id,
+        decided_at=datetime.now(timezone.utc),
+    )
 
 
 @pytest.mark.asyncio
@@ -326,6 +373,207 @@ async def test_failure_after_version_and_decision_rolls_back_everything(
             )) == 0
             document = await session.scalar(select(Document).where(Document.id == ingested.document_pk))
             assert document.current_version_id == ingested.document_version_id
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_cross_organization_review_decision_and_audit_references_are_rejected(
+    migration_database_engine,
+):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            org_a, _, reviewer_a, ingested_a = await _seed(session)
+            org_b, _, reviewer_b, ingested_b = await _seed(session)
+            decision_a = await submit_review_decision(
+                session, organization_id=org_a,
+                document_pk=ingested_a.document_pk,
+                expected_version_id=ingested_a.document_version_id,
+                reviewer_principal_id=reviewer_a, decision="approve",
+                reason="Approve fixture A", request_id="cross-org-a",
+                idempotency_key="cross-org-key-a",
+            )
+
+            version_b = await session.scalar(select(DocumentVersion).where(
+                DocumentVersion.id == ingested_b.document_version_id
+            ))
+            approved_b = _make_child_version(
+                version_b, created_by_principal_id=reviewer_b,
+                review_state="approved",
+            )
+            session.add(approved_b)
+            await session.flush()
+            cross_org_decision = _review_decision_row(
+                organization_id=org_b,
+                document_pk=ingested_b.document_pk,
+                reviewed_version_id=ingested_b.document_version_id,
+                resulting_version_id=approved_b.id,
+                reviewer_principal_id=reviewer_a,
+            )
+            with pytest.raises(DBAPIError, match="fk_document_review_decisions_reviewer"):
+                async with session.begin_nested():
+                    session.add(cross_org_decision)
+                    await session.flush()
+
+            cross_org_event = AuditEvent(
+                organization_id=org_b,
+                event_type="document.review.approved",
+                outcome="succeeded", actor_kind="system",
+                request_id="cross-org-audit-reference", details={},
+                review_decision_id=decision_a.decision.id,
+                occurred_at=datetime.now(timezone.utc),
+            )
+            with pytest.raises(DBAPIError, match="fk_audit_events_review_decision"):
+                async with session.begin_nested():
+                    session.add(cross_org_event)
+                    await session.flush()
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_database_trigger_rejects_invalid_review_lineage_and_state(
+    migration_database_engine,
+):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            org_lineage, _, reviewer_lineage, ingested_lineage = await _seed(session)
+            org_state, _, reviewer_state, ingested_state = await _seed(session)
+
+            reviewed_lineage = await session.scalar(select(DocumentVersion).where(
+                DocumentVersion.id == ingested_lineage.document_version_id
+            ))
+            wrong_lineage = _make_child_version(
+                reviewed_lineage, created_by_principal_id=reviewer_lineage,
+                review_state="approved", change_kind="content_update",
+            )
+            session.add(wrong_lineage)
+            await session.flush()
+            invalid_lineage = _review_decision_row(
+                organization_id=org_lineage,
+                document_pk=ingested_lineage.document_pk,
+                reviewed_version_id=reviewed_lineage.id,
+                resulting_version_id=wrong_lineage.id,
+                reviewer_principal_id=reviewer_lineage,
+            )
+            with pytest.raises(DBAPIError, match="invalid document review decision lineage"):
+                async with session.begin_nested():
+                    session.add(invalid_lineage)
+                    await session.flush()
+
+            reviewed_state = await session.scalar(select(DocumentVersion).where(
+                DocumentVersion.id == ingested_state.document_version_id
+            ))
+            draft = _make_child_version(
+                reviewed_state, created_by_principal_id=reviewer_state,
+                review_state="draft", change_kind="content_update",
+            )
+            approved_from_draft = _make_child_version(
+                draft, created_by_principal_id=reviewer_state,
+                review_state="approved",
+            )
+            session.add_all([draft, approved_from_draft])
+            await session.flush()
+            invalid_state = _review_decision_row(
+                organization_id=org_state,
+                document_pk=ingested_state.document_pk,
+                reviewed_version_id=draft.id,
+                resulting_version_id=approved_from_draft.id,
+                reviewer_principal_id=reviewer_state,
+            )
+            with pytest.raises(DBAPIError, match="reviewed document version is not in review"):
+                async with session.begin_nested():
+                    session.add(invalid_state)
+                    await session.flush()
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_review_decision_trigger_blocks_owner_update_and_delete(
+    migration_database_engine,
+):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            organization_id, _, reviewer_id, ingested = await _seed(session)
+            result = await submit_review_decision(
+                session, organization_id=organization_id,
+                document_pk=ingested.document_pk,
+                expected_version_id=ingested.document_version_id,
+                reviewer_principal_id=reviewer_id, decision="approve",
+                reason="Immutable fixture", request_id="immutable-decision",
+                idempotency_key="immutable-decision-key",
+            )
+            with pytest.raises(DBAPIError, match="document_review_decisions are immutable"):
+                async with session.begin_nested():
+                    await session.execute(
+                        update(DocumentReviewDecision)
+                        .where(DocumentReviewDecision.id == result.decision.id)
+                        .values(reason="changed")
+                    )
+            with pytest.raises(DBAPIError, match="document_review_decisions are immutable"):
+                async with session.begin_nested():
+                    await session.execute(
+                        delete(DocumentReviewDecision)
+                        .where(DocumentReviewDecision.id == result.decision.id)
+                    )
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_application_role_can_submit_but_cannot_update_or_delete_decision(
+    migration_database_engine,
+):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            organization_id, _, reviewer_id, ingested = await _seed(session)
+            await connection.execute(text("SET LOCAL ROLE opsbrain_app"))
+            assert await connection.scalar(text("SELECT current_user")) == "opsbrain_app"
+
+            result = await submit_review_decision(
+                session, organization_id=organization_id,
+                document_pk=ingested.document_pk,
+                expected_version_id=ingested.document_version_id,
+                reviewer_principal_id=reviewer_id, decision="approve",
+                reason="Application role review", request_id="app-role-review",
+                idempotency_key="app-role-review-key",
+            )
+            assert result.decision.id is not None
+            assert await connection.scalar(text(
+                "SELECT has_table_privilege(current_user, "
+                "'document_review_decisions', 'UPDATE')"
+            )) is False
+            assert await connection.scalar(text(
+                "SELECT has_table_privilege(current_user, "
+                "'document_review_decisions', 'DELETE')"
+            )) is False
+
+            with pytest.raises(DBAPIError, match="permission denied"):
+                async with session.begin_nested():
+                    await session.execute(
+                        update(DocumentReviewDecision)
+                        .where(DocumentReviewDecision.id == result.decision.id)
+                        .values(reason="application update")
+                    )
+            with pytest.raises(DBAPIError, match="permission denied"):
+                async with session.begin_nested():
+                    await session.execute(
+                        delete(DocumentReviewDecision)
+                        .where(DocumentReviewDecision.id == result.decision.id)
+                    )
         finally:
             await session.close()
             await transaction.rollback()
