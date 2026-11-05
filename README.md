@@ -6,7 +6,7 @@ The project is implemented as small, tested vertical slices. Retrieval, ACL enfo
 
 ## 1. Current status
 
-Latest merged repository checkpoint: `2026-10-23`, merge commit `17b0b5a` on `main` (Pull Request #15). The audit-event storage work described below is local feature-branch work and is not yet merged.
+Latest merged repository checkpoint: `2026-11-05`, merge commit `4630a50` on `main` (Pull Request #36). Reindex-job storage, approval-driven enqueueing, chunk-only worker execution, delayed retry, lease fencing, and expired-lease reclaim are merged.
 
 ### Implemented and tested
 
@@ -20,8 +20,14 @@ Latest merged repository checkpoint: `2026-10-23`, merge commit `17b0b5a` on `ma
 - A sequential PostgreSQL ingestion lifecycle supporting initial creation, unchanged replay, body and metadata updates, immutable version history, parent-version lineage, review-state reset, and rollback behavior covered by tests.
 - Database constraints for ingestion jobs, items, and attempts, including organization isolation, principal-scoped idempotency-key uniqueness, and terminal-state consistency.
 - Audit-event storage foundation: the `audit_events` table, scoped foreign-key and check constraints, query indexes, an append-only trigger, and separate database roles for migrations and application runtime.
+- Immutable derived configuration, derived set, and chunk storage with deterministic heading-aware chunking and atomic chunk-build/activation workflows.
+- Reindex job, item, and attempt storage; approval-driven enqueueing; chunk-only worker processing; delayed retries; persisted lease fencing and expired-lease reclaim.
 
 ### Latest recorded evidence
+
+For merge commit `4630a50`, the focused reindex worker and storage suite passed with `19 passed`. The Docker full suite passed with the dedicated concurrency database enabled: `146 passed`. `python -m alembic check` reported `No new upgrade operations detected`, and `git diff --check` was clean. The local database migration head was `b719c0e4a216`.
+
+Older evidence below is retained for historical checkpoints and is not a statement of the current suite size.
 
 The following results were recorded for implementation commit `3a1aa75` before it was merged through Pull Request #14:
 
@@ -43,11 +49,10 @@ These are repository-recorded results for the stated commit and development envi
 
 ### Not implemented or not yet demonstrated
 
-- Request-to-job orchestration, item processing, a retry worker, and the request-level idempotency flow.
+- Shared request-level idempotency across API/job workflows and production error classification for database/network failures.
 - FastAPI ingestion and query endpoints defined by the minimal API contract.
-- Audit-event emission by application workflows, ACL, derived-data, chunk, embedding, and relationship tables.
-- Concurrent document creation or concurrent semantic updates.
-- Complete source move, delete, restore, and rebuild lifecycles.
+- Complete ACL/capability enforcement for review, activation, and retrieval; concurrent lifecycle transitions beyond the reindex lease protocol.
+- Workers for embedding, full-text, and relationship targets; heartbeat and recovery after external side effects.
 - Ollama embeddings or answer generation.
 - Vector search, PostgreSQL full-text search, reciprocal rank fusion, and bounded graph expansion.
 - ACL-safe retrieval, context construction, citations, and abstention.
@@ -347,13 +352,11 @@ Recorded at implementation commit `3a1aa75`:
 
 The next storage and ingestion targets are:
 
-1. Add append-only audit-event storage.
-2. Implement request-to-job orchestration, request-level idempotency, and retry processing.
-3. Complete source move, delete, restore, and derived-data invalidation.
-4. Add stable chunking, Ollama embeddings, and pgvector retrieval.
-5. Apply ACL filtering before candidate ranking, graph expansion, context construction, and citations.
-6. Compare vector-only, hybrid, and bounded-graph retrieval using reproducible evaluation artifacts.
-7. Integrate Obsidian through FastAPI.
+1. Add FastAPI ingestion and query endpoints with authentication and request-level idempotency.
+2. Add application authorization and ACL enforcement before retrieval, activation, context construction, and citations.
+3. Implement embedding and full-text workers with reproducible model/configuration provenance.
+4. Add pgvector and full-text retrieval, then evaluate vector-only, hybrid, and bounded-graph approaches.
+5. Integrate Obsidian through FastAPI.
 
 A target or expected outcome is considered implemented only after matching runtime, test, migration, query, or evaluation evidence exists.
 
