@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.ingestion.review import submit_review_decision
@@ -356,6 +357,64 @@ async def test_retryable_failure_is_delayed_then_succeeds_without_duplicate_outp
             )) == 1
             assert await session.scalar(select(func.count()).select_from(DerivedSet)) == 1
             assert await session.scalar(select(func.count()).select_from(Chunk)) > 0
+        finally:
+            await session.close()
+            await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_operational_build_failure_is_delayed_then_succeeds(
+    migration_database_engine, monkeypatch,
+):
+    from src.ingestion import reindex_worker
+
+    real_build = reindex_worker.build_chunk_derived_set
+    calls = 0
+
+    async def fail_database_once_then_build(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OperationalError(
+                "INSERT chunks", {}, RuntimeError("database connection reset"),
+            )
+        return await real_build(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reindex_worker, "build_chunk_derived_set", fail_database_once_then_build,
+    )
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            _, _, approval = await _enqueue_approval(session)
+            item_id = await process_next_chunk_reindex_item(session)
+            item = await session.get(ReindexJobItem, item_id)
+            attempts = list((await session.scalars(select(ReindexJobItemAttempt).where(
+                ReindexJobItemAttempt.reindex_job_item_id == item_id,
+            ).order_by(ReindexJobItemAttempt.attempt_number))).all())
+            assert item.processing_status == "queued"
+            assert item.next_retry_at is not None
+            assert [(attempt.status, attempt.retryable, attempt.error_code) for attempt in attempts] == [
+                ("failed", True, "transient_database_error"),
+            ]
+            assert await session.scalar(select(func.count()).select_from(AuditEvent).where(
+                AuditEvent.reindex_job_id == approval.reindex_job_id,
+                AuditEvent.event_type.like("reindex.item.%"),
+            )) == 0
+
+            item.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            await session.flush()
+            assert await process_next_chunk_reindex_item(session) == item_id
+            item = await session.get(ReindexJobItem, item_id)
+            assert (item.processing_status, item.outcome) == ("succeeded", "rebuilt")
+            assert await session.scalar(select(func.count()).select_from(AuditEvent).where(
+                AuditEvent.reindex_job_id == approval.reindex_job_id,
+                AuditEvent.event_type == "reindex.item.activated",
+            )) == 1
         finally:
             await session.close()
             await tx.rollback()

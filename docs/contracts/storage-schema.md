@@ -1003,6 +1003,8 @@ Required constraints:
 
 Baseline lease/retry policy: `max_attempts = 3`, `lease_seconds = 60`, `retry_delay_seconds = 30`. Heartbeat là optional và chưa triển khai.
 
+Phân loại lỗi worker v1: `RetryableReindexError` dùng mã `transient_chunk_build_failure`; SQLAlchemy `OperationalError` dùng mã `transient_database_error`; các lỗi khác dùng mã terminal `chunk_build_failed`. Mã lỗi là stable và không được chứa message, query, path hoặc nội dung exception.
+
 ### 12.5 Processing and activation rules
 
 1. Mỗi lần claim, worker mở Tx1 và chọn item queued đã đến hạn, thuộc job có target set được worker hỗ trợ, bằng `SELECT ... FOR UPDATE SKIP LOCKED`. Baseline hiện tại chỉ hỗ trợ chính xác `targets = ['chunks']`. Chọn và khóa item là điểm phân xử giữa các worker.

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.ingestion.derived_activation import activate_derived_set
@@ -31,6 +32,15 @@ class RetryableReindexError(Exception):
 
 class _FencedAttempt(Exception):
     """The worker no longer owns this attempt or its strict lease expired."""
+
+
+def _classify_reindex_error(error: Exception) -> tuple[bool, str]:
+    """Return the persisted retry policy without exposing exception details."""
+    if isinstance(error, RetryableReindexError):
+        return True, "transient_chunk_build_failure"
+    if isinstance(error, OperationalError):
+        return True, "transient_database_error"
+    return False, "chunk_build_failed"
 
 
 @dataclass(frozen=True)
@@ -347,19 +357,13 @@ async def process_next_chunk_reindex_item(session: AsyncSession) -> UUID | None:
     except _FencedAttempt:
         await session.rollback()
         return claim.item_id
-    except RetryableReindexError:
+    except Exception as error:
         await session.rollback()
         try:
-            item_id = await _record_failure(session, claim, retryable=True, code="transient_chunk_build_failure", now=_now())
-            await session.commit()
-            return item_id
-        except Exception:
-            await session.rollback()
-            raise
-    except Exception:
-        await session.rollback()
-        try:
-            item_id = await _record_failure(session, claim, retryable=False, code="chunk_build_failed", now=_now())
+            retryable, code = _classify_reindex_error(error)
+            item_id = await _record_failure(
+                session, claim, retryable=retryable, code=code, now=_now(),
+            )
             await session.commit()
             return item_id
         except Exception:
