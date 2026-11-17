@@ -185,7 +185,7 @@ async def test_worker_rolls_back_partial_build_and_marks_failed(migration_databa
             join_transaction_mode="create_savepoint",
         )
         try:
-            _, _, approval = await _enqueue_approval(session)
+            organization_id, _, approval = await _enqueue_approval(session)
 
             async def fail_build(*args, **kwargs):
                 raise RuntimeError("private path and body must not leak")
@@ -203,8 +203,12 @@ async def test_worker_rolls_back_partial_build_and_marks_failed(migration_databa
             assert attempts[0].retryable is False
             job = await session.get(ReindexJob, approval.reindex_job_id)
             assert job.status == "failed"
-            assert await session.scalar(select(func.count()).select_from(DerivedSet)) == 0
-            assert await session.scalar(select(func.count()).select_from(Chunk)) == 0
+            assert await session.scalar(select(func.count()).select_from(DerivedSet).where(
+                DerivedSet.organization_id == organization_id
+            )) == 0
+            assert await session.scalar(select(func.count()).select_from(Chunk).join(
+                DerivedSet, DerivedSet.id == Chunk.derived_set_id,
+            ).where(DerivedSet.organization_id == organization_id)) == 0
             event = await session.scalar(select(AuditEvent).where(
                 AuditEvent.reindex_job_id == approval.reindex_job_id,
                 AuditEvent.event_type == "reindex.item.failed",
@@ -287,6 +291,42 @@ async def test_embedding_worker_persists_vectors_and_activates_ready_chunk_set(
             )) == await session.scalar(select(func.count()).select_from(Chunk).where(
                 Chunk.derived_set_id == derived_set.id,
             ))
+        finally:
+            await session.close()
+            await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_chunk_worker_queues_embedding_follow_up_before_activation(
+    migration_database_engine,
+):
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False,
+                               join_transaction_mode="create_savepoint")
+        try:
+            _, document_pk, approval = await _enqueue_approval(session)
+            job = await session.get(ReindexJob, approval.reindex_job_id)
+            configuration = await session.get(DerivedConfiguration, job.configuration_id)
+            configuration.embedding_model = "test-embed-model"
+            configuration.embedding_dimensions = 3
+            await session.flush()
+
+            assert await process_next_chunk_reindex_item(session) is not None
+            derived_set = await session.scalar(select(DerivedSet).where(
+                DerivedSet.document_pk == document_pk,
+                DerivedSet.document_version_id == approval.resulting_version.id,
+            ))
+            follow_up = await session.scalar(select(ReindexJob).where(
+                ReindexJob.organization_id == job.organization_id,
+                ReindexJob.targets == ["embeddings"],
+            ))
+            assert derived_set is not None and derived_set.is_active is False
+            assert follow_up is not None
+            assert await session.scalar(select(ReindexJobItem).where(
+                ReindexJobItem.reindex_job_id == follow_up.id,
+                ReindexJobItem.processing_status == "queued",
+            )) is not None
         finally:
             await session.close()
             await tx.rollback()
@@ -667,7 +707,7 @@ async def test_retryable_failure_is_delayed_then_succeeds_without_duplicate_outp
             join_transaction_mode="create_savepoint",
         )
         try:
-            _, _, approval = await _enqueue_approval(session)
+            organization_id, _, approval = await _enqueue_approval(session)
             item_id = await process_next_chunk_reindex_item(session)
             item = await session.get(ReindexJobItem, item_id)
             assert item.processing_status == "queued"
@@ -690,8 +730,12 @@ async def test_retryable_failure_is_delayed_then_succeeds_without_duplicate_outp
                 AuditEvent.reindex_job_id == approval.reindex_job_id,
                 AuditEvent.event_type == "reindex.item.activated",
             )) == 1
-            assert await session.scalar(select(func.count()).select_from(DerivedSet)) == 1
-            assert await session.scalar(select(func.count()).select_from(Chunk)) > 0
+            assert await session.scalar(select(func.count()).select_from(DerivedSet).where(
+                DerivedSet.organization_id == organization_id
+            )) == 1
+            assert await session.scalar(select(func.count()).select_from(Chunk).join(
+                DerivedSet, DerivedSet.id == Chunk.derived_set_id,
+            ).where(DerivedSet.organization_id == organization_id)) > 0
         finally:
             await session.close()
             await tx.rollback()
@@ -770,7 +814,7 @@ async def test_three_retryable_failures_end_item_and_job_failed_once(migration_d
             join_transaction_mode="create_savepoint",
         )
         try:
-            _, _, approval = await _enqueue_approval(session)
+            organization_id, _, approval = await _enqueue_approval(session)
             item_id = None
             for _ in range(3):
                 item_id = await process_next_chunk_reindex_item(session)
@@ -790,7 +834,9 @@ async def test_three_retryable_failures_end_item_and_job_failed_once(migration_d
             assert item.processing_status == "failed" and item.outcome == "failed"
             assert item.error_code == "transient_chunk_build_failure"
             assert job.status == "failed"
-            assert await session.scalar(select(func.count()).select_from(DerivedSet)) == 0
+            assert await session.scalar(select(func.count()).select_from(DerivedSet).where(
+                DerivedSet.organization_id == organization_id
+            )) == 0
             assert await session.scalar(select(func.count()).select_from(AuditEvent).where(
                 AuditEvent.reindex_job_id == job.id,
                 AuditEvent.event_type == "reindex.item.failed",

@@ -132,7 +132,6 @@ async def activate_derived_set(
                     ChunkEmbedding.organization_id == organization_id,
                     ChunkEmbedding.derived_set_id == derived_set.id,
                 )
-                .with_for_update()
             )).all())
             if len(embeddings) != chunk_count:
                 raise ValueError("required derived components are incomplete")

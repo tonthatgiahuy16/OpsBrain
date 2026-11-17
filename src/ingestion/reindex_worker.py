@@ -6,6 +6,7 @@ while that persisted attempt is still the item's active, unexpired token.
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -106,6 +107,16 @@ async def claim_next_chunk_reindex_item(
     """Tx1: claim one due chunk item and commit its 60-second lease."""
     claimed_at = now or _now()
     try:
+        attempt_count_query = (
+            select(func.count())
+            .select_from(ReindexJobItemAttempt)
+            .where(
+                ReindexJobItemAttempt.organization_id == ReindexJobItem.organization_id,
+                ReindexJobItemAttempt.reindex_job_item_id == ReindexJobItem.id,
+            )
+            .correlate(ReindexJobItem)
+            .scalar_subquery()
+        )
         item = await session.scalar(
             select(ReindexJobItem)
             .join(ReindexJob, ReindexJob.id == ReindexJobItem.reindex_job_id)
@@ -115,6 +126,7 @@ async def claim_next_chunk_reindex_item(
                 | (ReindexJobItem.next_retry_at <= claimed_at),
                 ReindexJob.status.in_(["queued", "running"]),
                 ReindexJob.targets == [target],
+                attempt_count_query < MAX_ATTEMPTS,
             )
             .order_by(ReindexJob.submitted_at, ReindexJobItem.created_at)
             .with_for_update(of=ReindexJobItem, skip_locked=True)
@@ -332,6 +344,34 @@ async def _finalize_build(
         await _succeed(session, item=item, job=job, attempt=attempt, outcome="skipped", code="document_not_eligible", derived_set=None, now=final_now)
         return item.id
     await build_savepoint.commit()
+    if configuration.embedding_model is not None:
+        follow_up = ReindexJob(
+            organization_id=claim.organization_id,
+            request_id=f"{job.request_id}:embeddings:{derived_set.id}",
+            idempotency_key_hash=sha256(
+                f"{job.id}:embeddings:{derived_set.id}".encode()
+            ).hexdigest(),
+            request_payload_hash=sha256(
+                f"{claim.document_pk}:{claim.source_document_version_id}:embeddings".encode()
+            ).hexdigest(),
+            submitted_by_principal_id=job.submitted_by_principal_id,
+            scope_type="documents", targets=["embeddings"],
+            reason="chunks_ready_for_embeddings",
+            configuration_id=claim.configuration_id,
+            requested_document_count=1, status="queued",
+        )
+        session.add(follow_up)
+        await session.flush()
+        session.add(ReindexJobItem(
+            organization_id=claim.organization_id, reindex_job_id=follow_up.id,
+            document_pk=claim.document_pk,
+            source_document_version_id=claim.source_document_version_id,
+            processing_status="queued",
+        ))
+        await _succeed(session, item=item, job=job, attempt=attempt,
+                       outcome="rebuilt", code=None, derived_set=derived_set,
+                       now=final_now)
+        return item.id
     await activate_derived_set(session, organization_id=claim.organization_id, derived_set_id=derived_set.id)
     await _succeed(session, item=item, job=job, attempt=attempt, outcome="rebuilt", code=None, derived_set=derived_set, now=final_now)
     return item.id
@@ -419,6 +459,7 @@ async def process_next_embedding_reindex_item(
     claim = await claim_next_embedding_reindex_item(session)
     if claim is None:
         return None
+    stage = "embedding_prepare"
     try:
         now = _now()
         item, job, attempt = await _lock_claim(session, claim, now)
@@ -497,6 +538,7 @@ async def process_next_embedding_reindex_item(
             model=embedding_model,
             dimensions=embedding_dimensions,
         )
+        stage = "embedding_generate"
         vectors = await client.embed_texts(inputs)
 
         item, job, attempt = await _lock_claim(session, claim, _now())
@@ -566,12 +608,14 @@ async def process_next_embedding_reindex_item(
                            derived_set=None, now=final_now)
             await session.commit()
             return item.id
+        stage = "embedding_persist"
         await persist_chunk_embeddings(
             session,
             organization_id=claim.organization_id,
             derived_set_id=derived_set_id,
             vectors_by_chunk_id=dict(zip(chunk_ids, vectors, strict=True)),
         )
+        stage = "embedding_activate"
         activated = await activate_derived_set(
             session, organization_id=claim.organization_id, derived_set_id=derived_set_id,
         )
@@ -588,6 +632,8 @@ async def process_next_embedding_reindex_item(
         await session.rollback()
         try:
             retryable, code = _classify_reindex_error(error)
+            if code == "chunk_build_failed":
+                code = f"{stage}_failed"
             item_id = await _record_failure(
                 session, claim, retryable=retryable, code=code, now=_now(),
             )

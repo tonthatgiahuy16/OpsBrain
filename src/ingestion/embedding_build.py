@@ -82,7 +82,6 @@ async def persist_chunk_embeddings(
                 ChunkEmbedding.organization_id == organization_id,
                 ChunkEmbedding.derived_set_id == derived_set_id,
             )
-            .with_for_update()
         )).all())
         if existing:
             if len(existing) != len(chunks):

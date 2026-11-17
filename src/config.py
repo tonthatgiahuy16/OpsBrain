@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
     OLLAMA_LLM_MODEL: str = "qwen2.5:7b"
 
+    # Development-only opaque token -> principal UUID mapping for the minimal
+    # query endpoint. Keep this in local environment configuration, never Git.
+    LOCAL_QUERY_TOKEN_MAP_JSON: str = "{}"
+    QUERY_MIN_VECTOR_SCORE: float = 0.25
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

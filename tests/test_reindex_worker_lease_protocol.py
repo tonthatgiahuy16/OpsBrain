@@ -173,6 +173,52 @@ async def test_retry_is_delayed_then_next_claim_creates_new_attempt(
 
 
 @pytest.mark.asyncio
+async def test_claim_skips_exhausted_queued_item_and_claims_next_due_item(
+    migration_database_engine,
+):
+    """An exhausted legacy item must not starve later queued work."""
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            _, _, first_approval = await _enqueue_approval(session)
+            _, _, second_approval = await _enqueue_approval(session)
+            first_item = await session.scalar(select(ReindexJobItem).where(
+                ReindexJobItem.reindex_job_id == first_approval.reindex_job_id
+            ))
+            first_job = await session.get(ReindexJob, first_approval.reindex_job_id)
+            second_job = await session.get(ReindexJob, second_approval.reindex_job_id)
+            now = datetime.now(timezone.utc)
+            first_job.submitted_at = now - timedelta(seconds=1)
+            second_job.submitted_at = now
+            for attempt_number in range(1, 4):
+                session.add(ReindexJobItemAttempt(
+                    organization_id=first_item.organization_id,
+                    reindex_job_item_id=first_item.id,
+                    attempt_number=attempt_number,
+                    status="failed",
+                    retryable=True,
+                    error_code="transient_chunk_build_failure",
+                    started_at=now - timedelta(minutes=1),
+                    lease_expires_at=now - timedelta(seconds=1),
+                    completed_at=now - timedelta(seconds=1),
+                ))
+            await session.flush()
+
+            claim = await claim_next_chunk_reindex_item(session, now=now)
+
+            assert claim is not None
+            assert claim.job_id == second_approval.reindex_job_id
+            assert claim.attempt_number == 1
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
 async def test_expired_attempt_is_reclaimed_and_cannot_finalize(
     migration_database_engine,
 ):
