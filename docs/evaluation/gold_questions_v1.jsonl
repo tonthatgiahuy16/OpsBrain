@@ -1,0 +1,12 @@
+{"id":"GQ-001","question":"In deployment `payment-service-deployment-v1-4-0`, what did `pool_size` change from and to, and what was `max_overflow`?","answerable":true,"expected_document_ids":["payment-service-deployment-v1-4-0"]}
+{"id":"GQ-002","question":"When did the high 5xx rate alert fire, and how long after deployment v1.4.0 did that happen?","answerable":true,"expected_document_ids":["payment-service-high-5xx-alert","payment-service-http-503-2026-10-01"]}
+{"id":"GQ-003","question":"Which observed signals support the connection-pool exhaustion hypothesis during the HTTP 503 incident?","answerable":true,"expected_document_ids":["payment-service-503-diagnosis","payment-service-http-503-postmortem-2026-10-01"]}
+{"id":"GQ-004","question":"What was the recorded root cause of the HTTP 503 incident, and what configuration hotfix restored normal behavior?","answerable":true,"expected_document_ids":["payment-service-http-503-postmortem-2026-10-01","payment-service-deployment-v1-4-1"]}
+{"id":"GQ-005","question":"What safety checks and approvals are required before changing connection limits or restarting Payment Service?","answerable":true,"expected_document_ids":["payment-service-503-diagnosis"]}
+{"id":"GQ-006","question":"Under what threshold condition does the `payment-service-high-5xx-rate` alert fire?","answerable":true,"expected_document_ids":["payment-service-high-5xx-alert"]}
+{"id":"GQ-007","question":"What was the reviewed SQLAlchemy pool configuration baseline in release v1.3.2?","answerable":true,"expected_document_ids":["payment-service-deployment-v1-3-2"]}
+{"id":"GQ-008","question":"Which service depends on Payment Service to authorize payments, and was it identified as the source of the incident?","answerable":true,"expected_document_ids":["checkout-service"]}
+{"id":"GQ-009","question":"Did the connection-pool saturation alert exist during the `2026-10-01` HTTP 503 incident?","answerable":true,"expected_document_ids":["payment-service-connection-pool-saturation-alert"]}
+{"id":"GQ-010","question":"What read-only SQL query does the diagnosis runbook specify to summarize PostgreSQL connection states?","answerable":true,"expected_document_ids":["payment-service-503-diagnosis"]}
+{"id":"GQ-011","question":"Who approved hotfix deployment v1.4.1, and at what exact timestamp was it approved?","answerable":false,"expected_document_ids":[]}
+{"id":"GQ-012","question":"How many database connections are currently checked out in production right now?","answerable":false,"expected_document_ids":[]}
