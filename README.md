@@ -291,34 +291,11 @@ A successful health check proves only that the API can connect to PostgreSQL and
 
 ## 6. Tests
 
-### 6.1 Local test suite
+### 6.1 Official test path (Docker)
 
-Make sure PostgreSQL is running. Set the runtime URL with the application role and the migration URL with the owner role, both using the published host port:
+This is the authoritative verification path. It runs against the Compose-managed PostgreSQL, so results do not depend on host-side database roles or credentials.
 
-```powershell
-$env:DATABASE_URL = "postgresql+asyncpg://<app-user>:<app-password>@127.0.0.1:<published-port>/<database>"
-$env:MIGRATION_DATABASE_URL = "postgresql+asyncpg://<owner-user>:<owner-password>@127.0.0.1:<published-port>/<database>"
-
-python -m compileall -q .\src .\tests
-python -m pytest .\tests -q -p no:cacheprovider
-python -m alembic check
-
-Remove-Item Env:DATABASE_URL
-Remove-Item Env:MIGRATION_DATABASE_URL
-```
-
-Recorded at implementation commit `3a1aa75`:
-
-```text
-63 passed
-No new upgrade operations detected.
-```
-
-This result is evidence for the recorded commit and environment, not a guarantee of identical behavior or runtime on every machine.
-
-### 6.2 Docker test suite
-
-Make sure the `db` service is running:
+Make sure the `db` service is running. The `api` service only defines `DATABASE_URL`, so the migration URL must be passed explicitly for the tests. Inside the Compose network the database host is `db`, not `127.0.0.1`.
 
 ```powershell
 docker compose up -d --wait db
@@ -326,16 +303,56 @@ docker compose build api
 
 docker compose run --rm --no-deps `
   -e PYTHONDONTWRITEBYTECODE=1 `
+  -e DATABASE_URL="postgresql+asyncpg://<app-user>:<app-password>@db:5432/<database>" `
+  -e MIGRATION_DATABASE_URL="postgresql+asyncpg://<owner-user>:<owner-password>@db:5432/<database>" `
+  -v "${PWD}/src:/app/src:ro" `
   -v "${PWD}/tests:/app/tests:ro" `
   -v "${PWD}/data:/app/data:ro" `
   api `
   sh -lc 'python -m pytest /app/tests -q -p no:cacheprovider'
 ```
 
+Mounting `src` read-only lets one image test the current working tree without rebuilding; rebuild only when dependencies change. Because the mounts are read-only, run `python -m compileall` from section 6.2 on the host instead of inside the container.
+
+Troubleshooting: a shell variable named `DATABASE_URL` exported by another project overrides `.env` during Compose interpolation and silently points the tests at the wrong database. Running `docker compose config` shows the resolved value; the `-e` flags above take precedence over it.
+
 Recorded at implementation commit `3a1aa75`:
 
 ```text
 63 passed
+```
+
+Most recent working-tree run (2026-11-18, uncommitted changes present, not a committed state):
+
+```text
+177 passed, 2 skipped
+```
+
+The count moves while other slices are in progress; treat pass/fail as the signal, not the number.
+
+### 6.2 Optional host checks
+
+Use this only for fast feedback while editing. It is not the official test path: the runtime and migration roles authenticate over the published host port, so a PostgreSQL volume whose passwords no longer match `.env` fails here while section 6.1 still passes.
+
+Set both URLs explicitly in the current shell: a value already exported in the shell (for example by another project) overrides `.env` without any warning.
+
+```powershell
+$env:DATABASE_URL = "postgresql+asyncpg://<app-user>:<app-password>@127.0.0.1:<published-port>/<database>"
+$env:MIGRATION_DATABASE_URL = "postgresql+asyncpg://<owner-user>:<owner-password>@127.0.0.1:<published-port>/<database>"
+
+python -m compileall -q .\src .\tests
+python -m alembic check
+
+Remove-Item Env:DATABASE_URL
+Remove-Item Env:MIGRATION_DATABASE_URL
+```
+
+`alembic check` belongs here because it is meant to run with the owner role over the published port. If a host run fails with `password authentication failed for user "<owner-user>"`, the role password stored in the PostgreSQL volume does not match `.env`; fix the role or recreate the volume instead of treating it as a test failure.
+
+Recorded at implementation commit `3a1aa75`:
+
+```text
+No new upgrade operations detected.
 ```
 
 ## 7. Primary documentation

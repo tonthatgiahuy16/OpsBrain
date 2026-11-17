@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select, update
@@ -39,32 +39,43 @@ async def _seed_activation_inputs(
     effective_from: datetime | None = None,
     effective_until: datetime | None = None,
     embedding_model: str | None = None,
+    embedding_model_revision: str | None = None,
+    embedding_dimensions: int | None = None,
+    organization_id: UUID | None = None,
+    source_document: Path = SAMPLE_DOCUMENT,
 ):
-    organization_id = uuid4()
-    principal_id = uuid4()
+    if organization_id is None:
+        organization_id = uuid4()
+        principal_id = uuid4()
+        session.add_all(
+            [
+                Organization(
+                    id=organization_id,
+                    organization_key=f"activation-org-{organization_id}",
+                    display_name="Derived Activation Test",
+                    status="active",
+                ),
+                Principal(
+                    id=principal_id,
+                    organization_id=organization_id,
+                    principal_key=f"activation-user-{principal_id}",
+                    principal_kind="user",
+                    display_name="Activation Test User",
+                    status="active",
+                ),
+            ]
+        )
+        await session.flush()
+    else:
+        principal_id = await session.scalar(
+            select(Principal.id).where(Principal.organization_id == organization_id)
+        )
+        assert principal_id is not None
+
     source = validate_markdown_document(
-        SAMPLE_DOCUMENT.read_text(encoding="utf-8"),
-        source_uri=SAMPLE_DOCUMENT.as_uri(),
+        source_document.read_text(encoding="utf-8"),
+        source_uri=source_document.as_uri(),
     )
-    session.add_all(
-        [
-            Organization(
-                id=organization_id,
-                organization_key=f"activation-org-{organization_id}",
-                display_name="Derived Activation Test",
-                status="active",
-            ),
-            Principal(
-                id=principal_id,
-                organization_id=organization_id,
-                principal_key=f"activation-user-{principal_id}",
-                principal_kind="user",
-                display_name="Activation Test User",
-                status="active",
-            ),
-        ]
-    )
-    await session.flush()
 
     ingested = await ingest_validated_document(
         session,
@@ -121,10 +132,15 @@ async def _seed_activation_inputs(
 
     configuration = DerivedConfiguration(
         organization_id=organization_id,
-        configuration_key=f"activation-config-{organization_id}",
+        configuration_key=f"activation-config-{organization_id}-{uuid4()}",
         chunking_version="chunk-v1",
         embedding_model=embedding_model,
-        embedding_dimensions=384 if embedding_model else None,
+        embedding_model_revision=embedding_model_revision,
+        embedding_dimensions=(
+            embedding_dimensions
+            if embedding_dimensions is not None
+            else (384 if embedding_model else None)
+        ),
         configuration_payload={"max_characters": 1200},
         configuration_hash="a" * 64,
         status="active",

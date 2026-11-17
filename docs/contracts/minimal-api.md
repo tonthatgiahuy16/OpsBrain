@@ -1,7 +1,8 @@
 # OpsBrain Minimal API Contract
 
 - **Status:** Accepted
-- **Contract version:** `1.0`
+- **Contract version:** `1.1`
+- **Contract revision `1.1` (`2026-11-18`):** bổ sung additive `embedding_model_revision` và `embedding_dimensions` vào block `configuration` của query và reindex, cùng quy tắc backend tự resolve embedding profile từ active configuration. Được project owner chấp nhận trong phiên làm việc ngày `2026-11-18`.
 - **Primary owner:** Backend and Data Engineering
 - **Reviewer:** Corpus and Evaluation
 - **Decision date:** `2026-10-15`
@@ -102,8 +103,9 @@ Hai thành viên chấp nhận các quyết định baseline sau:
 4. Prototype sử dụng opaque Bearer token được backend ánh xạ sang principal đáng tin cậy.
 5. Query sử dụng một endpoint với `response_mode: evidence_only | answer`.
 6. Approval yêu cầu capability `document:approve`; reindex yêu cầu capability `index:rebuild`.
+7. Backend resolve `embedding_model`, `embedding_model_revision` và `embedding_dimensions` từ active configuration; client không gửi ba giá trị này và response phải trả lại chúng để kết quả có thể tái lập.
 
-Các quyết định này là baseline của contract version `0.1`. Thay đổi semantic phải được review và cập nhật contract version.
+Các quyết định 1–6 là baseline của contract version `0.1`; quyết định 7 được bổ sung ở revision `1.1`. Thay đổi semantic phải được review và cập nhật contract version.
 
 ## 8. Create ingestion job
 
@@ -520,6 +522,8 @@ Request body:
 - Endpoint yêu cầu capability `query:execute`.
 - Principal, organization, team và role được lấy từ authentication context.
 - Request body không được tự khai principal hoặc ACL.
+- Backend phải resolve embedding profile (`embedding_model`, `embedding_model_revision`, `embedding_dimensions`) từ active configuration và dùng đúng profile đó cho cả query embedding lẫn candidate filtering. Client không gửi các giá trị này.
+- Nếu các derived set **retrieval-eligible** đang active có nhiều hơn một embedding profile, hoặc profile duy nhất của chúng khác profile từ active configuration, endpoint phải trả `503 retrieval_unavailable` thay vì trả kết quả thiếu document. Đánh giá eligibility phải dùng lifecycle, review state, temporal validity và organization status tại thời điểm query.
 - Strategy chưa được triển khai phải trả lỗi rõ ràng, không âm thầm đổi sang strategy khác.
 
 ### 12.3 Evidence-only response
@@ -555,6 +559,8 @@ Request body:
   "configuration": {
     "retrieval_config_id": "retrieval-v1",
     "embedding_model": "nomic-embed-text",
+    "embedding_model_revision": "2024-02-15",
+    "embedding_dimensions": 768,
     "generator_model": null
   },
   "latency_ms": {
@@ -595,6 +601,8 @@ Khi không có đủ evidence hợp lệ, API trả HTTP `200 OK` với response
   "configuration": {
     "retrieval_config_id": "retrieval-v1",
     "embedding_model": "nomic-embed-text",
+    "embedding_model_revision": "2024-02-15",
+    "embedding_dimensions": 768,
     "generator_model": null
   },
   "latency_ms": {
@@ -774,7 +782,9 @@ Principal chỉ được xem job do mình tạo. Principal vận hành có capab
   ],
   "configuration": {
     "chunking_version": "chunk-v1",
-    "embedding_model": "nomic-embed-text"
+    "embedding_model": "nomic-embed-text",
+    "embedding_model_revision": "2024-02-15",
+    "embedding_dimensions": 768
   },
   "summary": {
     "requested": 2,
@@ -797,7 +807,7 @@ Job status nhận `queued`, `running`, `completed`, `completed_with_errors` ho�
 - Reindex phải giữ nguyên ACL của source document.
 - Derived record mới phải truy ngược được tới đúng document version.
 - Reindex không được làm document trái quyền xuất hiện trong candidate, graph, context hoặc citation.
-- Job phải ghi document version, chunking version, embedding model và configuration đã sử dụng.
+- Job phải ghi document version, chunking version, embedding model, embedding model revision, embedding dimensions và configuration đã sử dụng.
 - Nếu document version thay đổi trong khi rebuild, derived data của version cũ không được kích hoạt cho current version.
 - Derived data thay thế chỉ được kích hoạt sau khi tập cần thiết hoàn thành nhất quán.
 - Reindex thất bại không được để trạng thái nửa cũ, nửa mới trở thành active.
@@ -984,6 +994,7 @@ Khi triển khai, tối thiểu phải có automated test hoặc reproducible ru
 14. Reindex giữ nguyên ACL, không kích hoạt derived data của version cũ và không tạo record active trùng.
 15. Error envelope không chứa raw exception, secret, DSN hoặc Bearer token.
 16. Health endpoint dùng sanitized error thay vì exception nội bộ.
+17. Query chỉ dùng đúng embedding profile đã resolve từ active configuration và từ chối chạy khi eligible active derived set có nhiều profile hoặc profile duy nhất không khớp active configuration.
 
 ### 15.4 Deferred scope
 
