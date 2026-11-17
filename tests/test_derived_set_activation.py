@@ -8,9 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.ingestion.derived_activation import activate_derived_set
 from src.ingestion.derived_build import build_chunk_derived_set
+from src.ingestion.embedding_build import persist_chunk_embeddings
 from src.ingestion.frontmatter import validate_markdown_document
 from src.ingestion.lifecycle import ingest_validated_document
 from src.models.storage import (
+    Chunk,
     DerivedConfiguration,
     DerivedSet,
     Document,
@@ -334,6 +336,47 @@ async def test_activation_rejects_configuration_with_unstored_embedding_componen
                 )
 
             assert derived_set.is_active is False
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_activation_succeeds_after_every_chunk_has_an_embedding(
+    migration_database_engine,
+):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+
+        try:
+            organization_id, _, _, configuration, derived_set = (
+                await _seed_activation_inputs(
+                    session,
+                    embedding_model="test-embed-model",
+                )
+            )
+            chunks = list((await session.scalars(select(Chunk).where(
+                Chunk.organization_id == organization_id,
+                Chunk.derived_set_id == derived_set.id,
+            ))).all())
+            await persist_chunk_embeddings(
+                session,
+                organization_id=organization_id,
+                derived_set_id=derived_set.id,
+                vectors_by_chunk_id={
+                    chunk.id: [0.0] * configuration.embedding_dimensions
+                    for chunk in chunks
+                },
+            )
+
+            activated = await activate_derived_set(
+                session,
+                organization_id=organization_id,
+                derived_set_id=derived_set.id,
+            )
+
+            assert activated.is_active is True
         finally:
             await session.close()
             await transaction.rollback()

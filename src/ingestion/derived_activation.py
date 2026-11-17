@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.storage import (
     Chunk,
+    ChunkEmbedding,
     DerivedConfiguration,
     DerivedSet,
     Document,
@@ -21,7 +22,7 @@ async def activate_derived_set(
     organization_id: UUID,
     derived_set_id: UUID,
 ) -> DerivedSet:
-    """Atomically make a ready, current, chunk-only set active.
+    """Atomically make a ready, current set with complete components active.
 
     The caller owns the surrounding transaction. Document-row locking
     serializes activation with version/lifecycle transitions. ACL evaluation
@@ -102,12 +103,11 @@ async def activate_derived_set(
         if configuration is None or configuration.status != "active":
             raise ValueError("derived configuration is not active")
 
-        # This slice supports chunk-only builds. Never expose a set as ready
-        # when its recorded configuration requires storage we do not have yet.
+        # Full-text and relationship output still have no storage/build path.
+        # Embeddings are allowed only when every chunk has one persisted row.
         if any(
             value is not None
             for value in (
-                configuration.embedding_model,
                 configuration.full_text_configuration,
                 configuration.relationship_extractor_version,
             )
@@ -124,6 +124,18 @@ async def activate_derived_set(
         )
         if not chunk_count:
             raise ValueError("required derived components are incomplete")
+
+        if configuration.embedding_model is not None:
+            embeddings = list((await session.scalars(
+                select(ChunkEmbedding.id)
+                .where(
+                    ChunkEmbedding.organization_id == organization_id,
+                    ChunkEmbedding.derived_set_id == derived_set.id,
+                )
+                .with_for_update()
+            )).all())
+            if len(embeddings) != chunk_count:
+                raise ValueError("required derived components are incomplete")
 
         if derived_set.is_active:
             return derived_set

@@ -619,6 +619,7 @@ Required constraints:
 Activation rules:
 
 - Derived set chỉ được kích hoạt sau khi toàn bộ component bắt buộc của configuration hoàn thành nhất quán.
+- Configuration có `embedding_model` chỉ được kích hoạt khi mỗi chunk của derived set có đúng một `chunk_embeddings` row thuộc cùng set; thiếu bất kỳ row nào phải giữ set inactive.
 - Activation phải khóa document, đọc lại current version và xác minh document vẫn retrieval-eligible.
 - `document_version_id` phải vẫn là current version tại thời điểm activation.
 - Kích hoạt set mới và vô hiệu hóa set cũ phải nằm trong cùng transaction.
