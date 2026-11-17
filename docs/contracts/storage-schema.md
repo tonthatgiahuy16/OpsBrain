@@ -695,6 +695,7 @@ Required constraints:
 - Embedding là immutable; đổi model, revision, dimensions hoặc input tạo derived set mới.
 - Embedding vector không được trả trực tiếp qua minimal API.
 - `(organization_id, derived_set_id, chunk_id)` tham chiếu chunk thuộc đúng derived set.
+- Embedding input v1 là `chunks.content` sau khi chuẩn hóa newline bằng `normalize_markdown_body`, mã hóa UTF-8; `embedding_input_hash` là SHA-256 của đúng bytes đó. Persist chỉ nhận batch đủ toàn bộ chunk của derived set; replay batch hoàn chỉnh trả lại row hiện có, không ghi trùng.
 
 Pgvector index type, distance operator và dimension cố định cho migration được chốt ở retrieval milestone. Việc chưa chốt tuning không làm thay đổi yêu cầu provenance hoặc rebuildability.
 
