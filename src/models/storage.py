@@ -15,6 +15,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID as PGUUID
+from pgvector.sqlalchemy import Vector
 
 from src.database import Base
 
@@ -1308,5 +1309,56 @@ class Chunk(Base):
         CheckConstraint(
             "token_count IS NULL OR token_count >= 0",
             name="token_count_non_negative",
+        ),
+    )
+
+
+class ChunkEmbedding(Base):
+    __tablename__ = "chunk_embeddings"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    derived_set_id = Column(PGUUID(as_uuid=True), nullable=False)
+    chunk_id = Column(PGUUID(as_uuid=True), nullable=False)
+    embedding_model = Column(Text, nullable=False)
+    embedding_model_revision = Column(Text, nullable=True)
+    embedding_dimensions = Column(Integer, nullable=False)
+    embedding_input_hash = Column(Text, nullable=False)
+    embedding = Column(Vector(), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "derived_set_id", "chunk_id"),
+        ForeignKeyConstraint(
+            ["organization_id", "derived_set_id"],
+            ["derived_sets.organization_id", "derived_sets.id"],
+            name="fk_chunk_embeddings_derived_set",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "derived_set_id", "chunk_id"],
+            ["chunks.organization_id", "chunks.derived_set_id", "chunks.id"],
+            name="fk_chunk_embeddings_chunk",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "btrim(embedding_model) <> ''",
+            name="embedding_model_not_blank",
+        ),
+        CheckConstraint(
+            "embedding_dimensions > 0",
+            name="embedding_dimensions_positive",
+        ),
+        CheckConstraint(
+            "embedding_input_hash ~ '^[0-9a-f]{64}$'",
+            name="embedding_input_hash_sha256_hex",
+        ),
+        CheckConstraint(
+            "vector_dims(embedding) = embedding_dimensions",
+            name="embedding_dimensions_match_vector",
         ),
     )
