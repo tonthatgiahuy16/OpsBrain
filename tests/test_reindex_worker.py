@@ -3,16 +3,20 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.ingestion.review import submit_review_decision
 from src.ingestion.frontmatter import validate_markdown_document
 from src.ingestion.lifecycle import ingest_validated_document
-from src.ingestion.reindex_worker import process_next_chunk_reindex_item
+from src.ingestion.reindex_worker import (
+    process_next_chunk_reindex_item,
+    process_next_embedding_reindex_item,
+)
+from src.ingestion.ollama_embeddings import OllamaEmbeddingError
 from src.models.storage import (
-    AuditEvent, Chunk, DerivedConfiguration, DerivedSet, Document, DocumentVersion, ReindexJob,
+    AuditEvent, Chunk, ChunkEmbedding, DerivedConfiguration, DerivedSet, Document, DocumentVersion, ReindexJob,
     ReindexJobItem, ReindexJobItemAttempt,
 )
 from tests.test_document_review_decisions import _seed
@@ -103,7 +107,7 @@ async def test_worker_builds_activates_and_completes_approval_job(migration_data
             assert item_id is not None
             item = await session.get(ReindexJobItem, item_id)
             job = await session.get(ReindexJob, approval.reindex_job_id)
-            assert (item.processing_status, item.outcome) == ("succeeded", "rebuilt")
+            assert (item.processing_status, item.outcome) == ("succeeded", "rebuilt"), item.error_code
             assert job.status == "completed"
             assert await session.scalar(select(func.count()).select_from(ReindexJobItemAttempt).where(
                 ReindexJobItemAttempt.reindex_job_item_id == item_id,
@@ -233,6 +237,337 @@ async def test_chunk_worker_does_not_claim_embedding_job(migration_database_engi
             ))
             assert item.processing_status == "queued"
             assert await session.scalar(select(ReindexJob.status).where(ReindexJob.id == job_id)) == "queued"
+        finally:
+            await session.close()
+            await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_embedding_worker_persists_vectors_and_activates_ready_chunk_set(
+    migration_database_engine,
+):
+    class FakeEmbeddingClient:
+        async def embed_texts(self, inputs):
+            return [[0.0, 0.1, 0.2] for _ in inputs]
+
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            _, document_pk, approval = await _enqueue_approval(session)
+            job = await session.get(ReindexJob, approval.reindex_job_id)
+            configuration = await session.get(DerivedConfiguration, job.configuration_id)
+            configuration.embedding_model = "test-embed-model"
+            configuration.embedding_dimensions = 3
+            await session.flush()
+
+            from src.ingestion.derived_build import build_chunk_derived_set
+
+            derived_set = await build_chunk_derived_set(
+                session, organization_id=job.organization_id,
+                document_pk=document_pk,
+                document_version_id=approval.resulting_version.id,
+                configuration_id=configuration.id,
+            )
+            job.targets = ["embeddings"]
+            await session.flush()
+
+            item_id = await process_next_embedding_reindex_item(
+                session, embedding_client=FakeEmbeddingClient(),
+            )
+            item = await session.get(ReindexJobItem, item_id)
+            assert (item.processing_status, item.outcome) == ("succeeded", "rebuilt"), item.error_code
+            assert item.output_derived_set_id == derived_set.id
+            assert derived_set.is_active is True
+            assert await session.scalar(select(func.count()).select_from(ChunkEmbedding).where(
+                ChunkEmbedding.derived_set_id == derived_set.id,
+            )) == await session.scalar(select(func.count()).select_from(Chunk).where(
+                Chunk.derived_set_id == derived_set.id,
+            ))
+        finally:
+            await session.close()
+            await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_embedding_worker_skips_ineligible_source_before_calling_ollama(
+    migration_database_engine,
+):
+    class MustNotEmbed:
+        async def embed_texts(self, inputs):
+            raise AssertionError("Ollama must not run for an ineligible source")
+
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            _, document_pk, approval = await _enqueue_approval(session)
+            job = await session.get(ReindexJob, approval.reindex_job_id)
+            configuration = await session.scalar(select(DerivedConfiguration).where(
+                DerivedConfiguration.organization_id == job.organization_id,
+                DerivedConfiguration.id == job.configuration_id,
+            ))
+            configuration.embedding_model = "test-embed-model"
+            configuration.embedding_dimensions = 3
+            from src.ingestion.derived_build import build_chunk_derived_set
+
+            await build_chunk_derived_set(
+                session, organization_id=job.organization_id, document_pk=document_pk,
+                document_version_id=approval.resulting_version.id,
+                configuration_id=configuration.id,
+            )
+            approval.resulting_version.document_status = "revoked"
+            job.targets = ["embeddings"]
+            await session.flush()
+
+            item_id = await process_next_embedding_reindex_item(
+                session, embedding_client=MustNotEmbed(),
+            )
+            item = await session.get(ReindexJobItem, item_id)
+            assert (item.processing_status, item.outcome, item.skip_code) == (
+                "succeeded", "skipped", "document_not_eligible",
+            ), item.error_code
+        finally:
+            await session.close()
+            await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_embedding_worker_rechecks_source_after_ollama_before_persisting(
+    migration_database_engine,
+):
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            _, document_pk, approval = await _enqueue_approval(session)
+            job = await session.get(ReindexJob, approval.reindex_job_id)
+            configuration = await session.get(DerivedConfiguration, job.configuration_id)
+            configuration.embedding_model = "test-embed-model"
+            configuration.embedding_dimensions = 3
+            from src.ingestion.derived_build import build_chunk_derived_set
+
+            derived_set = await build_chunk_derived_set(
+                session, organization_id=job.organization_id, document_pk=document_pk,
+                document_version_id=approval.resulting_version.id,
+                configuration_id=configuration.id,
+            )
+            source_version_id = approval.resulting_version.id
+            derived_set_id = derived_set.id
+            job.targets = ["embeddings"]
+            await session.flush()
+
+            class SourceRevokingEmbeddingClient:
+                async def embed_texts(self, inputs):
+                    await session.execute(
+                        update(DocumentVersion)
+                        .where(DocumentVersion.id == source_version_id)
+                        .values(document_status="revoked")
+                    )
+                    return [[0.0, 0.1, 0.2] for _ in inputs]
+
+            item_id = await process_next_embedding_reindex_item(
+                session, embedding_client=SourceRevokingEmbeddingClient(),
+            )
+            item = await session.get(ReindexJobItem, item_id)
+            assert (item.processing_status, item.outcome, item.skip_code) == (
+                "succeeded", "skipped", "document_not_eligible",
+            ), item.error_code
+            stored_set = await session.get(DerivedSet, derived_set_id)
+            assert stored_set.is_active is False
+            assert await session.scalar(select(func.count()).select_from(
+                ChunkEmbedding
+            ).where(ChunkEmbedding.derived_set_id == derived_set_id)) == 0
+        finally:
+            await session.close()
+            await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_embedding_worker_delays_retryable_ollama_failure(
+    migration_database_engine,
+):
+    class TransientEmbeddingClient:
+        async def embed_texts(self, inputs):
+            raise OllamaEmbeddingError("ollama_unavailable", retryable=True)
+
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(
+            bind=connection, expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            _, document_pk, approval = await _enqueue_approval(session)
+            job = await session.get(ReindexJob, approval.reindex_job_id)
+            configuration = await session.scalar(select(DerivedConfiguration).where(
+                DerivedConfiguration.organization_id == job.organization_id,
+                DerivedConfiguration.id == job.configuration_id,
+            ))
+            configuration.embedding_model = "test-embed-model"
+            configuration.embedding_dimensions = 3
+            from src.ingestion.derived_build import build_chunk_derived_set
+
+            await build_chunk_derived_set(
+                session, organization_id=job.organization_id, document_pk=document_pk,
+                document_version_id=approval.resulting_version.id,
+                configuration_id=configuration.id,
+            )
+            job.targets = ["embeddings"]
+            await session.flush()
+
+            item_id = await process_next_embedding_reindex_item(
+                session, embedding_client=TransientEmbeddingClient(),
+            )
+            item = await session.get(ReindexJobItem, item_id)
+            attempt = await session.scalar(select(ReindexJobItemAttempt).where(
+                ReindexJobItemAttempt.reindex_job_item_id == item_id,
+            ))
+            assert item.processing_status == "queued"
+            assert item.next_retry_at is not None
+            assert (attempt.status, attempt.retryable, attempt.error_code) == (
+                "failed", True, "ollama_unavailable",
+            )
+        finally:
+            await session.close()
+            await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_embedding_worker_fails_non_retryable_ollama_error(
+    migration_database_engine,
+):
+    class RejectedEmbeddingClient:
+        async def embed_texts(self, inputs):
+            raise OllamaEmbeddingError("ollama_request_rejected", retryable=False)
+
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False,
+                               join_transaction_mode="create_savepoint")
+        try:
+            _, document_pk, approval = await _enqueue_approval(session)
+            job = await session.get(ReindexJob, approval.reindex_job_id)
+            configuration = await session.get(DerivedConfiguration, job.configuration_id)
+            configuration.embedding_model = "test-embed-model"
+            configuration.embedding_dimensions = 3
+            from src.ingestion.derived_build import build_chunk_derived_set
+
+            await build_chunk_derived_set(
+                session, organization_id=job.organization_id, document_pk=document_pk,
+                document_version_id=approval.resulting_version.id,
+                configuration_id=configuration.id,
+            )
+            job.targets = ["embeddings"]
+            await session.flush()
+
+            item_id = await process_next_embedding_reindex_item(
+                session, embedding_client=RejectedEmbeddingClient(),
+            )
+            item = await session.get(ReindexJobItem, item_id)
+            attempt = await session.scalar(select(ReindexJobItemAttempt).where(
+                ReindexJobItemAttempt.reindex_job_item_id == item_id,
+            ))
+            assert (item.processing_status, item.outcome, item.error_code) == (
+                "failed", "failed", "ollama_request_rejected",
+            )
+            assert (attempt.status, attempt.retryable, attempt.error_code) == (
+                "failed", False, "ollama_request_rejected",
+            )
+        finally:
+            await session.close()
+            await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_embedding_worker_skips_when_chunks_are_not_ready(
+    migration_database_engine,
+):
+    class MustNotEmbed:
+        async def embed_texts(self, inputs):
+            raise AssertionError("Ollama must not run before chunks are ready")
+
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False,
+                               join_transaction_mode="create_savepoint")
+        try:
+            _, _, approval = await _enqueue_approval(session)
+            job = await session.get(ReindexJob, approval.reindex_job_id)
+            configuration = await session.get(DerivedConfiguration, job.configuration_id)
+            configuration.embedding_model = "test-embed-model"
+            configuration.embedding_dimensions = 3
+            job.targets = ["embeddings"]
+            await session.flush()
+
+            item_id = await process_next_embedding_reindex_item(
+                session, embedding_client=MustNotEmbed(),
+            )
+            item = await session.get(ReindexJobItem, item_id)
+            assert (item.processing_status, item.outcome, item.skip_code) == (
+                "succeeded", "skipped", "embedding_source_not_available",
+            )
+        finally:
+            await session.close()
+            await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_embedding_worker_skips_active_set_without_calling_ollama(
+    migration_database_engine,
+):
+    class MustNotEmbed:
+        async def embed_texts(self, inputs):
+            raise AssertionError("Ollama must not run for the active embedding set")
+
+    async with migration_database_engine.connect() as connection:
+        tx = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False,
+                               join_transaction_mode="create_savepoint")
+        try:
+            _, document_pk, approval = await _enqueue_approval(session)
+            job = await session.get(ReindexJob, approval.reindex_job_id)
+            configuration = await session.get(DerivedConfiguration, job.configuration_id)
+            configuration.embedding_model = "test-embed-model"
+            configuration.embedding_dimensions = 3
+            from src.ingestion.derived_activation import activate_derived_set
+            from src.ingestion.derived_build import build_chunk_derived_set
+            from src.ingestion.embedding_build import persist_chunk_embeddings
+
+            derived_set = await build_chunk_derived_set(
+                session, organization_id=job.organization_id, document_pk=document_pk,
+                document_version_id=approval.resulting_version.id,
+                configuration_id=configuration.id,
+            )
+            chunks = list((await session.scalars(select(Chunk).where(
+                Chunk.derived_set_id == derived_set.id,
+            ))).all())
+            await persist_chunk_embeddings(
+                session, organization_id=job.organization_id, derived_set_id=derived_set.id,
+                vectors_by_chunk_id={chunk.id: [0.0, 0.1, 0.2] for chunk in chunks},
+            )
+            await activate_derived_set(
+                session, organization_id=job.organization_id, derived_set_id=derived_set.id,
+            )
+            job.targets = ["embeddings"]
+            await session.flush()
+
+            item_id = await process_next_embedding_reindex_item(
+                session, embedding_client=MustNotEmbed(),
+            )
+            item = await session.get(ReindexJobItem, item_id)
+            assert (item.processing_status, item.outcome, item.skip_code) == (
+                "succeeded", "skipped", "already_current",
+            )
         finally:
             await session.close()
             await tx.rollback()
