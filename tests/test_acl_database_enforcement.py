@@ -160,6 +160,32 @@ async def test_acl_entries_are_immutable_and_reject_cross_organization_subjects(
 
 
 @pytest.mark.asyncio
+async def test_hard_delete_of_acl_protected_version_is_rejected(
+    migration_database_engine,
+):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            organization_id, author_id, _, _, _ = await _seed(session)
+            restricted, _ = await _seed_restricted_version(
+                session,
+                organization_id=organization_id,
+                author_id=author_id,
+            )
+            with pytest.raises(DBAPIError, match="foreign key constraint"):
+                async with session.begin_nested():
+                    await session.execute(
+                        delete(DocumentVersion).where(
+                            DocumentVersion.id == restricted.document_version_id
+                        )
+                    )
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
 async def test_application_role_cannot_mutate_acl_entries(database_engine):
     async with database_engine.connect() as connection:
         assert await connection.scalar(text(

@@ -132,3 +132,6 @@ def downgrade() -> None:
         "ON document_versions"
     )
     op.execute("DROP FUNCTION IF EXISTS enforce_document_version_acl_snapshot()")
+    op.execute(
+        "GRANT UPDATE, DELETE ON TABLE document_version_acl_entries TO opsbrain_app"
+    )
