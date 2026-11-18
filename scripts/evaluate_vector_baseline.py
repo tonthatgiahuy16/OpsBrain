@@ -18,6 +18,7 @@ def _evaluate_case(case: dict[str, object], response: dict[str, object]) -> dict
     expected = set(case["expected_document_ids"])
     evidence = response.get("evidence", [])
     cited = [item["document_id"] for item in evidence]
+    forbidden = set(case.get("forbidden_document_ids", []))
     retrieved_expected = sorted(expected.intersection(cited))
     answerable = case["answerable"]
     abstained = response["abstained"]
@@ -28,6 +29,8 @@ def _evaluate_case(case: dict[str, object], response: dict[str, object]) -> dict
         "retrieved_expected_document_ids": retrieved_expected,
         "recall_at_k": len(retrieved_expected) / len(expected) if expected else None,
         "citation_correct": [document_id in expected for document_id in cited],
+        "forbidden_document_ids": sorted(forbidden),
+        "forbidden_documents_disclosed": sorted(forbidden.intersection(cited)),
         "abstention_correct": abstained is (not answerable),
         "response": response,
     }
@@ -49,6 +52,9 @@ def _metrics(cases: list[dict[str, object]]) -> dict[str, object]:
             sum(citation_flags) / len(citation_flags) if citation_flags else None
         ),
         "abstention_accuracy": sum(case["abstention_correct"] for case in cases) / len(cases),
+        "acl_leakage_cases": [
+            case["id"] for case in cases if case["forbidden_documents_disclosed"]
+        ],
     }
 
 
@@ -56,16 +62,27 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--token", required=True)
+    parser.add_argument("--token", help="Default opaque token for cases without principal_role.")
+    parser.add_argument(
+        "--tokens-json", type=Path,
+        help="JSON object mapping each case principal_role to an opaque token.",
+    )
     parser.add_argument("--top-k", type=int, default=5)
     args = parser.parse_args()
 
+    tokens_by_role = (
+        json.loads(args.tokens_json.read_text(encoding="utf-8"))
+        if args.tokens_json else {}
+    )
     results = []
     with TestClient(app) as client:
         for case in _load_cases(args.dataset):
+            token = tokens_by_role.get(case.get("principal_role"), args.token)
+            if not isinstance(token, str) or not token:
+                raise ValueError(f"no token configured for {case['id']}")
             http_response = client.post(
                 "/api/v1/queries",
-                headers={"Authorization": f"Bearer {args.token}"},
+                headers={"Authorization": f"Bearer {token}"},
                 json={
                     "question": case["question"],
                     "response_mode": "evidence_only",

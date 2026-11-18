@@ -241,3 +241,43 @@ async def test_direct_user_and_active_team_grants_stop_when_team_is_disabled(
         finally:
             await session.close()
             await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_same_named_role_in_another_organization_cannot_read_document(
+    migration_database_engine,
+):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            allowed, _, _, _ = await _seed_acl_documents(session)
+            other_org = Organization(
+                id=uuid4(), organization_key=f"other-{uuid4()}",
+                display_name="Other org", status="active",
+            )
+            other_principal = Principal(
+                id=uuid4(), organization_id=other_org.id,
+                principal_key="other-reader", principal_kind="user",
+                display_name="Other reader", status="active",
+            )
+            same_named_role = Role(
+                id=uuid4(), organization_id=other_org.id,
+                role_key="incident-reader", display_name="Incident reader", status="active",
+            )
+            session.add_all([other_org, other_principal, same_named_role])
+            await session.flush()
+            session.add(PrincipalRoleMembership(
+                organization_id=other_org.id, principal_id=other_principal.id,
+                role_id=same_named_role.id, status="active",
+            ))
+            await session.flush()
+            assert await resolve_readable_document_pks(
+                session, organization_id=other_org.id, principal_id=other_principal.id,
+            ) == set()
+            assert allowed["document_pk"] not in await resolve_readable_document_pks(
+                session, organization_id=other_org.id, principal_id=other_principal.id,
+            )
+        finally:
+            await session.close()
+            await transaction.rollback()

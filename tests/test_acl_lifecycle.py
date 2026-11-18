@@ -14,6 +14,7 @@ from src.models.storage import (
     PrincipalRoleMembership,
     Role,
 )
+from src.authorization.acl import resolve_readable_document_pks
 from tests.test_document_review_decisions import _seed
 
 
@@ -67,6 +68,62 @@ async def test_ingestion_materializes_acl_and_review_copies_it_to_approved_versi
                 DocumentVersionAclEntry.document_version_id == reviewed.resulting_version.id,
             ))).all())
             assert [entry.role_id for entry in approved_entries] == [role.id]
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_acl_version_transition_does_not_inherit_old_role_grant(
+    migration_database_engine,
+):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            organization_id, author_id, _, _, _ = await _seed(session)
+            reader = Principal(
+                id=uuid4(), organization_id=organization_id,
+                principal_key="reader", principal_kind="user", display_name="Reader", status="active",
+            )
+            reader_role = Role(
+                id=uuid4(), organization_id=organization_id,
+                role_key="incident-reader", display_name="Incident reader", status="active",
+            )
+            admin_role = Role(
+                id=uuid4(), organization_id=organization_id,
+                role_key="payments-admin", display_name="Payments admin", status="active",
+            )
+            session.add_all([reader, reader_role, admin_role])
+            await session.flush()
+            session.add(PrincipalRoleMembership(
+                organization_id=organization_id, principal_id=reader.id,
+                role_id=reader_role.id, status="active",
+            ))
+            first = validate_markdown_document(
+                RESTRICTED.read_text(encoding="utf-8"), source_uri=RESTRICTED.as_uri(),
+            )
+            v1 = await ingest_validated_document(
+                session, organization_id=organization_id, actor_principal_id=author_id,
+                document=first,
+            )
+            assert v1.document_pk in await resolve_readable_document_pks(
+                session, organization_id=organization_id, principal_id=reader.id,
+            )
+
+            changed = validate_markdown_document(
+                RESTRICTED.read_text(encoding="utf-8").replace(
+                    "incident-reader", "payments-admin",
+                ), source_uri=RESTRICTED.as_uri(),
+            )
+            v2 = await ingest_validated_document(
+                session, organization_id=organization_id, actor_principal_id=author_id,
+                document=changed,
+            )
+            assert v2.outcome == "updated"
+            assert v1.document_pk not in await resolve_readable_document_pks(
+                session, organization_id=organization_id, principal_id=reader.id,
+            )
         finally:
             await session.close()
             await transaction.rollback()
