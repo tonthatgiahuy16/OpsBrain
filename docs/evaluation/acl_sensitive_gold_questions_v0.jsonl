@@ -1,0 +1,3 @@
+{"id":"GQ-ACL-001","question":"What evidence is in the Restricted Allowed Runbook?","principal_role":"incident-reader","answerable":true,"expected_document_ids":["restricted-allowed"],"forbidden_document_ids":["restricted-blocked"]}
+{"id":"GQ-ACL-002","question":"What evidence is in the Restricted Blocked Runbook?","principal_role":"incident-reader","answerable":false,"expected_document_ids":[],"forbidden_document_ids":["restricted-blocked"]}
+{"id":"GQ-ACL-003","question":"What evidence is in the Restricted Allowed Runbook after the reader role is revoked?","principal_role":"incident-reader (revoked)","answerable":false,"expected_document_ids":[],"forbidden_document_ids":["restricted-allowed","restricted-blocked"]}

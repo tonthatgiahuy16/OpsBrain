@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.authorization.acl import resolve_readable_document_pks
 from src.config import get_settings
 from src.database import get_db
 from src.ingestion.ollama_embeddings import OllamaEmbeddingClient, OllamaEmbeddingError
@@ -125,17 +126,18 @@ async def execute_query(
 ) -> dict[str, object]:
     """Return authorized vector evidence, or abstain without disclosure.
 
-    This temporary baseline resolves the caller from a server-side token map and
-    limits candidates to its organization. Restricted-document ACL resolution
-    remains deliberately unavailable until ACL storage/runtime exists.
+    Candidate documents are resolved from current ACL grants before vector
+    profile discovery and ranking; citations are built only from those hits.
     """
     if request.response_mode == "answer":
         raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "generation_not_implemented")
     started = perf_counter()
     configuration = await _active_configuration(session, principal.organization_id)
-    allowed_document_pks = set((await session.scalars(
-        select(Document.id).where(Document.organization_id == principal.organization_id)
-    )).all())
+    allowed_document_pks = await resolve_readable_document_pks(
+        session,
+        organization_id=principal.organization_id,
+        principal_id=principal.id,
+    )
     profiles = await active_embedding_profiles(
         session,
         organization_id=principal.organization_id,

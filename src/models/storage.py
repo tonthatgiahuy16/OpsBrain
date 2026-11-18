@@ -103,6 +103,88 @@ class Principal(Base):
     )
 
 
+class Team(Base):
+    __tablename__ = "teams"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    team_key = Column(Text, nullable=False)
+    display_name = Column(Text, nullable=False)
+    status = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id"),
+        UniqueConstraint("organization_id", "team_key"),
+        ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="RESTRICT"),
+        CheckConstraint("btrim(team_key) <> ''", name="team_key_not_blank"),
+        CheckConstraint("btrim(display_name) <> ''", name="display_name_not_blank"),
+        CheckConstraint("status IN ('active', 'disabled')", name="status_allowed"),
+    )
+
+
+class Role(Base):
+    __tablename__ = "roles"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    role_key = Column(Text, nullable=False)
+    display_name = Column(Text, nullable=False)
+    status = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id"),
+        UniqueConstraint("organization_id", "role_key"),
+        ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="RESTRICT"),
+        CheckConstraint("btrim(role_key) <> ''", name="role_key_not_blank"),
+        CheckConstraint("btrim(display_name) <> ''", name="display_name_not_blank"),
+        CheckConstraint("status IN ('active', 'disabled')", name="status_allowed"),
+    )
+
+
+class PrincipalTeamMembership(Base):
+    __tablename__ = "principal_team_memberships"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    principal_id = Column(PGUUID(as_uuid=True), nullable=False)
+    team_id = Column(PGUUID(as_uuid=True), nullable=False)
+    status = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "principal_id", "team_id"),
+        ForeignKeyConstraint(["organization_id", "principal_id"], ["principals.organization_id", "principals.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["organization_id", "team_id"], ["teams.organization_id", "teams.id"], ondelete="RESTRICT"),
+        CheckConstraint("status IN ('active', 'revoked')", name="status_allowed"),
+        Index("ix_principal_team_memberships_active_principal", "organization_id", "principal_id", postgresql_where=text("status = 'active'")),
+    )
+
+
+class PrincipalRoleMembership(Base):
+    __tablename__ = "principal_role_memberships"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    principal_id = Column(PGUUID(as_uuid=True), nullable=False)
+    role_id = Column(PGUUID(as_uuid=True), nullable=False)
+    status = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "principal_id", "role_id"),
+        ForeignKeyConstraint(["organization_id", "principal_id"], ["principals.organization_id", "principals.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["organization_id", "role_id"], ["roles.organization_id", "roles.id"], ondelete="RESTRICT"),
+        CheckConstraint("status IN ('active', 'revoked')", name="status_allowed"),
+        Index("ix_principal_role_memberships_active_principal", "organization_id", "principal_id", postgresql_where=text("status = 'active'")),
+    )
+
+
 class IngestionJob(Base):
     __tablename__ = "ingestion_jobs"
 
@@ -1043,6 +1125,43 @@ class DocumentVersion(Base):
             "document_pk",
             "content_hash",
         ),
+    )
+
+
+class DocumentVersionAclEntry(Base):
+    """Immutable read grant attached to one source document version."""
+
+    __tablename__ = "document_version_acl_entries"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    document_pk = Column(PGUUID(as_uuid=True), nullable=False)
+    document_version_id = Column(PGUUID(as_uuid=True), nullable=False)
+    user_principal_id = Column(PGUUID(as_uuid=True), nullable=True)
+    team_id = Column(PGUUID(as_uuid=True), nullable=True)
+    role_id = Column(PGUUID(as_uuid=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["organization_id", "document_pk", "document_version_id"],
+            ["document_versions.organization_id", "document_versions.document_pk", "document_versions.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "user_principal_id"],
+            ["principals.organization_id", "principals.id"], ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(["organization_id", "team_id"], ["teams.organization_id", "teams.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["organization_id", "role_id"], ["roles.organization_id", "roles.id"], ondelete="RESTRICT"),
+        CheckConstraint(
+            "num_nonnulls(user_principal_id, team_id, role_id) = 1",
+            name="exactly_one_subject",
+        ),
+        Index("uq_document_version_acl_user_principal_id", "organization_id", "document_version_id", "user_principal_id", unique=True, postgresql_where=text("user_principal_id IS NOT NULL")),
+        Index("uq_document_version_acl_team_id", "organization_id", "document_version_id", "team_id", unique=True, postgresql_where=text("team_id IS NOT NULL")),
+        Index("uq_document_version_acl_role_id", "organization_id", "document_version_id", "role_id", unique=True, postgresql_where=text("role_id IS NOT NULL")),
+        Index("ix_document_version_acl_entries_document", "organization_id", "document_version_id"),
     )
 
 
