@@ -2,11 +2,11 @@
 
 OpsBrain is an evidence-first knowledge infrastructure prototype for investigating IT incidents. Its target is to manage versioned documents in PostgreSQL, retrieve authorized evidence, build controlled context, and answer with citations—or abstain when the evidence is insufficient.
 
-The project is implemented as small, tested vertical slices. Retrieval, ACL enforcement, Ollama generation, citations, and Obsidian integration described below are target architecture. They are not treated as implemented without matching runtime, test, migration, query, or evaluation evidence.
+The project is implemented as small, tested vertical slices. This README distinguishes code observed in the repository, recorded local evidence, and target architecture. A feature is not treated as end-to-end or production-ready without matching runtime, test, migration, query, or evaluation evidence.
 
 ## 1. Current status
 
-Latest merged repository checkpoint: `2026-11-05`, merge commit `4630a50` on `main` (Pull Request #36). Reindex-job storage, approval-driven enqueueing, chunk-only worker execution, delayed retry, lease fencing, and expired-lease reclaim are merged.
+Remote merged checkpoint: `2026-11-05`, merge commit `4630a50` on `origin/main` (Pull Request #36). The local `main` snapshot documented here additionally contains eight unpushed commits through `603e24e` on `2026-11-18`, covering the embedding, vector-query, baseline-evaluation, and initial query-ACL slices. It must not be described as merged or deployed until it is pushed and merged through the normal review flow.
 
 ### Implemented and tested
 
@@ -15,17 +15,30 @@ Latest merged repository checkpoint: `2026-11-05`, merge commit `4630a50` on `ma
 - A sample vault with 12 synthetic documents linked around a Payment Service HTTP 503 scenario.
 - A frontmatter validator for service, deployment, alert, incident, postmortem, and runbook documents.
 - Accepted frontmatter, minimal API, and storage schema contracts.
-- Alembic migrations and SQLAlchemy models for seven storage tables: `organizations`, `principals`, `documents`, `document_versions`, `ingestion_jobs`, `ingestion_job_items`, and `ingestion_job_attempts`.
+- Alembic migrations and SQLAlchemy models for organizations/principals, versioned documents, ingestion and audit history, review decisions, derived configurations and sets, chunks, embeddings, reindex jobs, and version-scoped ACL subjects and grants.
 - Canonical content hashing for validated Markdown.
 - A sequential PostgreSQL ingestion lifecycle supporting initial creation, unchanged replay, body and metadata updates, immutable version history, parent-version lineage, review-state reset, and rollback behavior covered by tests.
 - Database constraints for ingestion jobs, items, and attempts, including organization isolation, principal-scoped idempotency-key uniqueness, and terminal-state consistency.
 - Audit-event storage foundation: the `audit_events` table, scoped foreign-key and check constraints, query indexes, an append-only trigger, and separate database roles for migrations and application runtime.
 - Immutable derived configuration, derived set, and chunk storage with deterministic heading-aware chunking and atomic chunk-build/activation workflows.
-- Reindex job, item, and attempt storage; approval-driven enqueueing; chunk-only worker processing; delayed retries; persisted lease fencing and expired-lease reclaim.
+- Reindex job, item, and attempt storage; approval-driven enqueueing; chunk worker processing; delayed retries; persisted lease fencing and expired-lease reclaim.
+- Ollama `/api/embed` client with model/tag, dimension, count, finite-value, and retryability validation; embedding reindex worker; and a local worker runner.
+- `POST /api/v1/queries` in `evidence_only` mode. It resolves the local authenticated principal, filters readable documents before profile discovery and vector ranking, returns citations/evidence, and abstains when no eligible evidence remains or scores are below the configured threshold. `answer` mode explicitly returns `501` until generation is implemented.
+- Vector top-k retrieval scoped to organization, active/current/approved temporal eligibility, embedding profile, and the caller-supplied authorized document set.
+- Initial user/team/role ACL storage and resolver. Restricted-version grants are materialized from validated frontmatter during ingestion and copied to the review-transition version; query retrieval uses the resolver before ranking and citation construction.
+- A 12-note synthetic sample-vault loader, a frozen 12-question vector-only baseline dataset, raw baseline responses, and an ACL-sensitive question dataset with multi-principal runner support.
 
 ### Latest recorded evidence
 
 For merge commit `4630a50`, the focused reindex worker and storage suite passed with `19 passed`. The Docker full suite passed with the dedicated concurrency database enabled: `146 passed`. `python -m alembic check` reported `No new upgrade operations detected`, and `git diff --check` was clean. The local database migration head was `b719c0e4a216`.
+
+For the local, unmerged `2026-11-18` slices, recorded evidence is deliberately narrower:
+
+- A host Ollama probe and a container-to-host probe returned model `nomic-embed-text`, one embedding, and dimension `768`.
+- The synthetic sample-vault loader reported `ingested=12 approved_or_replayed=12 reindex_jobs=12`; the local worker runner subsequently reported `chunks=12 embeddings=12`.
+- The frozen EN vector-only baseline is recorded in [docs/evaluation/runs/VECTOR_BASELINE_2026-11-18.md](docs/evaluation/runs/VECTOR_BASELINE_2026-11-18.md): Recall@5 `84.62%` (11/13 expected documents), strict document-level citation proxy `34.00%`, and abstention accuracy `83.33%`. This is a synthetic-corpus baseline, not a generalization or production-quality claim.
+- The focused ACL lifecycle/query suite passed with `6 passed in 4.30s`; the evaluation CLI exposes `--tokens-json` for role-specific ACL cases. This is not a replacement for a fresh full-suite run after the ACL slices.
+- The current Alembic code head is `f1a9c3d7e5b2` (query ACL storage). Applying it to every runtime database remains an operational verification step.
 
 Older evidence below is retained for historical checkpoints and is not a statement of the current suite size.
 
@@ -50,12 +63,12 @@ These are repository-recorded results for the stated commit and development envi
 ### Not implemented or not yet demonstrated
 
 - Shared request-level idempotency across API/job workflows and production error classification for database/network failures.
-- FastAPI ingestion and query endpoints defined by the minimal API contract.
-- Complete ACL/capability enforcement for review, activation, and retrieval; concurrent lifecycle transitions beyond the reindex lease protocol.
-- Workers for embedding, full-text, and relationship targets; heartbeat and recovery after external side effects.
-- Ollama embeddings or answer generation.
-- Vector search, PostgreSQL full-text search, reciprocal rank fusion, and bounded graph expansion.
-- ACL-safe retrieval, context construction, citations, and abstention.
+- FastAPI ingestion endpoint, request-level idempotency across API/job workflows, and the remaining document/review endpoints from the minimal API contract.
+- Complete capability enforcement for review and activation; ACL enforcement beyond current vector candidates/citations, including graph traversal, context construction, and generation.
+- Full-text and relationship workers, worker heartbeat, and recovery after external side effects.
+- Ollama answer generation and a supported `response_mode: answer` path.
+- PostgreSQL full-text search, reciprocal rank fusion, bounded graph expansion, and their evaluation.
+- A fresh complete test-suite, migration, and end-to-end verification for the local unmerged embedding/query/ACL slices.
 - Obsidian integration, a complete CI pipeline, machine-readable structured logging, and backup/restore evidence.
 
 OpsBrain is not currently a production incident-management platform and does not execute remediation or production commands.
@@ -92,11 +105,7 @@ OpsBrain/
 ├── requirements.txt
 ├── alembic/
 │   ├── env.py
-│   └── versions/
-│       ├── 940c9eb1716a_create_core_storage_tables.py
-│       ├── b4b2a6760f09_create_ingestion_job_storage.py
-│       ├── a827ee2cd02b_create_audit_event_storage.py
-│       └── 5a58f7c5c515_enforce_audit_events_append_only.py
+│   └── versions/                 # core, lifecycle, review, derived, chunk, embedding, reindex and ACL migrations
 ├── data/
 │   └── sample-vault/
 │       └── payment-service/
@@ -105,7 +114,8 @@ OpsBrain/
 │   │   ├── document-frontmatter.md
 │   │   ├── minimal-api.md
 │   │   └── storage-schema.md
-│   └── project-specification.md
+│   ├── evaluation/               # frozen gold questions, raw runs and baseline report
+│   └── project/
 ├── migrations/
 │   ├── init_roles.sh
 │   └── init_pgvector.sql
@@ -113,12 +123,20 @@ OpsBrain/
 │   ├── config.py
 │   ├── database.py
 │   ├── main.py
+│   ├── api/                      # minimal query endpoint
+│   ├── authorization/            # document read ACL resolver
 │   ├── ingestion/
 │   │   ├── canonicalization.py
 │   │   ├── frontmatter.py
-│   │   └── lifecycle.py
+│   │   ├── lifecycle.py
+│   │   ├── ollama_embeddings.py
+│   │   └── reindex_worker.py
 │   └── models/
 │       └── storage.py
+├── scripts/
+│   ├── load_sample_vault.py
+│   ├── run_reindex_workers.py
+│   └── evaluate_vector_baseline.py
 └── tests/
     ├── conftest.py
     ├── test_frontmatter_validation.py
@@ -142,6 +160,7 @@ Application logs currently go to stdout with timestamp, level, and logger name. 
 - Python 3.11.
 - Git.
 - PowerShell for the Windows commands below.
+- Ollama on the host when exercising embeddings or `/api/v1/queries`; the Docker API reaches it through `host.docker.internal`.
 
 Credentials in `.env.example` are development defaults only. Do not use them in production and do not commit `.env`.
 
@@ -229,10 +248,10 @@ python -m alembic upgrade head
 python -m alembic current
 ```
 
-Expected `alembic current` output:
+At the repository snapshot documented here, expected `alembic current` output after `upgrade head` is:
 
 ```text
-5a58f7c5c515 (head)
+f1a9c3d7e5b2 (head)
 ```
 
 Remove the migration override from the PowerShell session when finished:
@@ -289,6 +308,39 @@ http://localhost:8000/docs
 
 A successful health check proves only that the API can connect to PostgreSQL and pgvector. It does not prove that migrations, ingestion, or retrieval work.
 
+### 5.7 Optional Ollama embedding setup
+
+Install Ollama on the host, then pull the embedding model:
+
+```powershell
+ollama pull nomic-embed-text
+```
+
+Ollama normally starts as a local service. If it is not already running, use `ollama serve`. A bind error on port `11434` usually means that the service is already running.
+
+For a process inside Docker Compose, set the base URL to the Docker Desktop host alias:
+
+```dotenv
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_EMBED_MODEL=nomic-embed-text
+```
+
+The supported baseline configuration uses `768` dimensions. Test the host endpoint before blaming the application or Docker network:
+
+```powershell
+$payload = @{
+  model = "nomic-embed-text"
+  input = @("OpsBrain embedding probe")
+  dimensions = 768
+  truncate = $false
+} | ConvertTo-Json -Depth 4
+
+Invoke-RestMethod -Method Post `
+  -Uri "http://localhost:11434/api/embed" `
+  -ContentType "application/json" `
+  -Body $payload
+```
+
 ## 6. Tests
 
 ### 6.1 Official test path (Docker)
@@ -322,13 +374,13 @@ Recorded at implementation commit `3a1aa75`:
 63 passed
 ```
 
-Most recent working-tree run (2026-11-18, uncommitted changes present, not a committed state):
+Historical working-tree run (2026-11-18, before the local ACL commits; not a committed-state release gate):
 
 ```text
 177 passed, 2 skipped
 ```
 
-The count moves while other slices are in progress; treat pass/fail as the signal, not the number.
+The count moves while other slices are in progress; treat pass/fail as the signal, not the number. A fresh full-suite result after the local ACL slices is still required before a release or merge claim.
 
 ### 6.2 Optional host checks
 
@@ -367,12 +419,12 @@ No new upgrade operations detected.
 
 ## 8. Roadmap
 
-The next storage and ingestion targets are:
+The next targets after the current vector/initial-ACL slice are:
 
-1. Add FastAPI ingestion and query endpoints with authentication and request-level idempotency.
-2. Add application authorization and ACL enforcement before retrieval, activation, context construction, and citations.
-3. Implement embedding and full-text workers with reproducible model/configuration provenance.
-4. Add pgvector and full-text retrieval, then evaluate vector-only, hybrid, and bounded-graph approaches.
+1. Add a FastAPI ingestion endpoint and request-level idempotency; retain the existing query endpoint's local-development authentication only as a development boundary.
+2. Extend ACL/capability enforcement from vector candidate filtering to review, activation, context construction, graph expansion, and generation.
+3. Add PostgreSQL full-text retrieval and RRF, then compare it with the frozen vector-only baseline under the same corpus/configuration/access context.
+4. Add bounded graph expansion only with per-hop ACL enforcement and dedicated negative tests.
 5. Integrate Obsidian through FastAPI.
 
 A target or expected outcome is considered implemented only after matching runtime, test, migration, query, or evaluation evidence exists.
