@@ -1,0 +1,53 @@
+# Gold questions v1
+
+> **Trạng thái:** Đóng băng cho baseline `vector-only` (`v1`). Evidence từng case đã được Codex đối chiếu với 12 note synthetic theo ủy quyền của Huy, project owner, ngày `2026-11-18`. Đây không phải review độc lập của một human reviewer khác.
+>
+> **An toàn dữ liệu:** File này chỉ dùng `document_id`, heading và sự kiện synthetic từ `data/sample-vault/payment-service/`. Không chứa vault cá nhân, thông tin cá nhân, credential, token, URL nội bộ hay dữ liệu khách hàng.
+
+## 1. Phạm vi cố định và giả định thí nghiệm
+
+- **Corpus:** 12 note Markdown synthetic trong `data/sample-vault/payment-service/`, tại Git commit `246451ecfbfd1a7f68993b6caedfc53b6175b19f`.
+- **Mục tiêu:** Đánh giá retrieval trước generation (`Recall@k`, `MRR`/`nDCG` ở tầng tìm nguồn; sau đó mới đo `citation accuracy` và `abstention accuracy` ở tầng endpoint). Không dùng file này để chứng minh runtime đã chạy.
+- **Giả định trạng thái ingestion/review:** Trong file Markdown gốc, cả 12 note đang đặt frontmatter `review_state: in_review`. Vì `src/retrieval/vector_search.py` (`vector_top_k`) chỉ trả về `DocumentVersion` có `document_status = 'active'`, `review_state = 'approved'`, còn hiệu lực theo `effective_from`/`effective_until` và `DerivedSet.is_active = True`, bộ v0 này **giả định 12 note đều đã được approve và index đầy đủ** trong tập thí nghiệm trước khi chạy eval.
+- **Tách biến ngôn ngữ (`EN` vs `VI`):** Corpus viết hoàn toàn bằng tiếng Anh, còn model embedding mặc định (`nomic-embed-text`) chủ yếu tối ưu cho tiếng Anh. Bảng bên dưới cung cấp song song **Câu hỏi chuẩn (`EN`)** để đo baseline retrieval sạch không bị nhiễu ngôn ngữ, và **Câu hỏi tiếng Việt (`VI`)** để thử nghiệm cross-lingual riêng nếu cần.
+- **Access context (`Allowed role`):** Tạm dùng placeholder `organization` (principal có quyền đọc phạm vi `organization` của Payment Service) cho tới khi bảng ACL và resolver theo `principal` được triển khai ở Milestone 5.
+- **Quy ước evidence:** `document_id#Heading` là chunk/mục kỳ vọng cần truy xuất được. Câu trả lời cuối cùng vẫn phải bám chặt citation thực tế.
+- **Chống overfitting:** Không tuning chunking/threshold/retrieval trên toàn bộ tập này rồi coi đó là đánh giá độc lập; cần bổ sung holdout set khi mở rộng sang `v1`.
+
+## 2. Bộ câu hỏi nháp (chuẩn hóa theo 6 nhóm taxonomy)
+
+Các nhóm chuẩn theo `opsbrain-retrieval-evaluation`: `exact identifier`, `semantic symptom`, `multi-hop`, `version-sensitive`, `unanswerable`, `ACL-sensitive`.
+
+| ID | Loại câu hỏi | Allowed role | Câu hỏi (EN — baseline) | Câu hỏi (VI — tham chiếu) | Answerable | Expected evidence IDs | Kỳ vọng kiểm chứng & lưu ý | Reviewer |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| GQ-001 | `exact identifier` | `organization` | In deployment `payment-service-deployment-v1-4-0`, what did `pool_size` change from and to, and what was `max_overflow`? | Trong deployment `payment-service-deployment-v1-4-0`, `pool_size` đổi từ bao nhiêu xuống bao nhiêu và `max_overflow` là gì? | yes | `payment-service-deployment-v1-4-0#Suspected change` | `pool_size`: `40 → 4`, `max_overflow`: `0`; note chỉ nêu giả thuyết (*"may have caused connection exhaustion"*), chưa khẳng định là nguyên nhân đã chứng minh. | Huy (project owner; review delegated to Codex), 2026-11-18 |
+| GQ-002 | `exact identifier` | `organization` | When did the high 5xx rate alert fire, and how long after deployment v1.4.0 did that happen? | Alert high-5xx kích hoạt lúc nào và cách deployment v1.4.0 bao lâu? | yes | `payment-service-high-5xx-alert#Observed event`, `payment-service-http-503-2026-10-01#Timeline` | `2026-10-01T09:07:00+07:00`, 7 phút sau deployment v1.4.0 lúc `09:00` (mốc `09:00` nằm trong body của `Timeline`, không nằm trong `v1-4-0#Summary`). | Huy (project owner; review delegated to Codex), 2026-11-18 |
+| GQ-003 | `semantic symptom` | `organization` | Which observed signals support the connection-pool exhaustion hypothesis during the HTTP 503 incident? | Tín hiệu nào hỗ trợ giả thuyết cạn connection pool trong sự cố HTTP 503? | yes | `payment-service-503-diagnosis#Decision`, `payment-service-http-503-postmortem-2026-10-01#Supporting evidence` | Tổng hợp: lỗi 503 bắt đầu sau thay đổi pool, timeout/pool-limit error ở log, connection wait time tăng, error rate giảm sau khi khôi phục; giữ mức độ *"supported"*. | Huy (project owner; review delegated to Codex), 2026-11-18 |
+| GQ-004 | `multi-hop` | `organization` | What was the recorded root cause of the HTTP 503 incident, and what configuration hotfix restored normal behavior? | Root cause được ghi nhận của HTTP 503 là gì, và hotfix nào được áp dụng? | yes | `payment-service-http-503-postmortem-2026-10-01#Root cause`, `payment-service-deployment-v1-4-1#Configuration change` | v1.4.0 giảm `pool_size` `40 → 4` (`max_overflow=0`); v1.4.1 phục hồi `4 → 40`. Không đánh đồng cải thiện theo thời gian là quan hệ nhân quả tuyệt đối. | Huy (project owner; review delegated to Codex), 2026-11-18 |
+| GQ-005 | `semantic symptom` | `organization` | What safety checks and approvals are required before changing connection limits or restarting Payment Service? | Trước khi đổi connection limit hoặc restart Payment Service, operator phải làm gì? | yes | `payment-service-503-diagnosis#Safety rules`, `payment-service-503-diagnosis#Human approval gate` | Cần human approval và ghi nhận đủ: proposed change, supporting evidence, expected effect, rollback condition, approving principal. | Huy (project owner; review delegated to Codex), 2026-11-18 |
+| GQ-006 | `exact identifier` | `organization` | Under what threshold condition does the `payment-service-high-5xx-rate` alert fire? | Alert `payment-service-high-5xx-rate` kích hoạt theo ngưỡng nào? | yes | `payment-service-high-5xx-alert#Trigger condition` | Tỷ lệ HTTP 5xx vượt `5 percent` trong 5 phút liên tiếp. *Lưu ý kỹ thuật:* mã `payment-service-high-5xx-rate` chỉ nằm ở frontmatter (`alert_rule_ref`), chưa nằm trong body chunk. | Huy (project owner; review delegated to Codex), 2026-11-18 |
+| GQ-007 | `version-sensitive` | `organization` | What was the reviewed SQLAlchemy pool configuration baseline in release v1.3.2? | Cấu hình baseline đã review ở release v1.3.2 là gì? | yes | `payment-service-deployment-v1-3-2#Configuration` | `pool_size: 40`, `max_overflow: 0`; là historical baseline trước v1.4.0, không phải cấu hình đang chạy của v1.4.0. *(Xem hạn chế ở mục 3)*. | Huy (project owner; review delegated to Codex), 2026-11-18 |
+| GQ-008 | `multi-hop` | `organization` | Which service depends on Payment Service to authorize payments, and was it identified as the source of the incident? | Service nào phụ thuộc Payment Service để authorize payment, và có phải nguồn gốc sự cố không? | yes | `checkout-service#Dependencies`, `checkout-service#Operational context` | `Checkout Service` phụ thuộc `Payment Service`; Checkout Service vẫn healthy và không được xác định là source of failure. | Huy (project owner; review delegated to Codex), 2026-11-18 |
+| GQ-009 | `exact identifier` | `organization` | Did the connection-pool saturation alert exist during the `2026-10-01` HTTP 503 incident? | Alert connection-pool saturation đã tồn tại trong sự cố ngày `2026-10-01` chưa? | yes | `payment-service-connection-pool-saturation-alert#Scenario status` | Chưa; đây là action item đề xuất sau postmortem, không có tuyên bố đã deploy. | Huy (project owner; review delegated to Codex), 2026-11-18 |
+| GQ-010 | `exact identifier` | `organization` | What read-only SQL query does the diagnosis runbook specify to summarize PostgreSQL connection states? | Runbook yêu cầu truy vấn read-only nào để tóm tắt trạng thái PostgreSQL connections? | yes | `payment-service-503-diagnosis#Step 4 — Inspect PostgreSQL activity` | Truy vấn `pg_stat_activity` lọc `datname = current_database()` nhóm theo `state`; nêu rõ permission PostgreSQL có thể hạn chế chi tiết session. | Huy (project owner; review delegated to Codex), 2026-11-18 |
+| GQ-011 | `unanswerable` | `organization` | Who approved hotfix deployment v1.4.1, and at what exact timestamp was it approved? | Ai phê duyệt hotfix v1.4.1 và phê duyệt lúc mấy giờ? | no | _none_ | Abstain: nội dung note không ghi tên người phê duyệt hay thời điểm phê duyệt (mục `Governance note` chỉ ghi trạng thái `in_review` và không nêu approver). | Huy (project owner; review delegated to Codex), 2026-11-18 |
+| GQ-012 | `unanswerable` | `organization` | How many database connections are currently checked out in production right now? | Hiện tại production có bao nhiêu connections đang checkout? | no | _none_ | Abstain: corpus chỉ là tài liệu kịch bản synthetic tĩnh, không có telemetry runtime hiện tại. | Huy (project owner; review delegated to Codex), 2026-11-18 |
+
+## 3. Khoảng trống đã biết ở v0 (cần bổ sung cho v1 / Milestone 5+)
+
+1. **Chưa có case `ACL-sensitive`:** Hiện mới giữ placeholder `Allowed role = organization` vì repo chưa có bảng ACL và ACL resolver theo `principal`. Khi vào Milestone 5, cần tách ít nhất hai team/role (ví dụ `payments-platform` và `commerce-platform` hoặc tài liệu `restricted`) và thêm các case kiểm tra cả cho phép lẫn từ chối/abstain khi bị chặn quyền.
+2. **Case `version-sensitive` ở v0 chưa test cập nhật cùng `document_id`:** `GQ-007` hỏi về tài liệu `v1.3.2`, vốn là một `document_id` độc lập với `v1.4.0`/`v1.4.1`. Khi mở rộng sang `v1`, cần bổ sung case cùng một `document_id` có version cũ bị supersede hoặc `effective_until` hết hạn để chứng minh version cũ không lọt vào retrieval.
+3. **Độ nhạy metadata ở `GQ-006`:** Vì `chunking.py` hiện chunk theo Markdown body, `GQ-006` sẽ giúp đo xem vector-only với title/nội dung body có tìm ra `payment-service-high-5xx-alert#Trigger condition` khi câu hỏi dùng đúng `alert_rule_ref` từ frontmatter hay không.
+
+## 4. Điều kiện để chốt thành gold dataset v1
+
+1. Reviewer xác nhận từng câu hỏi (`EN`/`VI`), `Expected evidence IDs` và `Answerable` khớp đúng 12 note nguồn.
+2. Thay `pending` ở cột `Reviewer` bằng danh tính/vai trò và ngày duyệt; bỏ hoặc tách case trùng/mơ hồ.
+3. Khóa corpus bằng Git commit SHA và chuyển sang định dạng machine-readable (JSONL hoặc CSV) kèm dataset version.
+4. Khi chạy evaluation, giữ cố định corpus, chunking, embedding model/revision/dimensions, `top_k` và access context; lưu raw run output trước khi tính `Recall@k`, `MRR`/`nDCG`, `citation accuracy` và `abstention accuracy`.
+
+## 5. Chưa xác minh
+
+- Chưa có holdout dataset độc lập; kết quả baseline không phải đánh giá tổng quát hóa.
+- ACL vẫn chỉ là allowlist theo organization; chưa có ACL resolver theo principal hoặc case `ACL-sensitive`.
+- Baseline endpoint chưa có full-text, RRF, graph expansion hay generation (`answer`).

@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from src.ingestion.acl import copy_version_acl
 from src.ingestion.eligibility import is_pre_acl_retrieval_eligible
 
 from src.ingestion.canonicalization import normalize_markdown_body
@@ -266,6 +267,13 @@ async def submit_review_decision(
         )
         session.add(resulting)
         await session.flush()
+        await copy_version_acl(
+            session,
+            organization_id=organization_id,
+            document_pk=document_pk,
+            source_version_id=reviewed.id,
+            target_version_id=resulting.id,
+        )
 
         organization = await session.scalar(select(Organization).where(
             Organization.id == organization_id

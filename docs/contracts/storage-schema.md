@@ -1009,7 +1009,7 @@ Phân loại lỗi worker v1: `RetryableReindexError` dùng mã `transient_chunk
 
 ### 12.5 Processing and activation rules
 
-1. Mỗi lần claim, worker mở Tx1 và chọn item queued đã đến hạn, thuộc job có target set được worker hỗ trợ, bằng `SELECT ... FOR UPDATE SKIP LOCKED`. Baseline hiện tại chỉ hỗ trợ chính xác `targets = ['chunks']`. Chọn và khóa item là điểm phân xử giữa các worker.
+1. Mỗi lần claim, worker mở Tx1 và chọn item queued đã đến hạn, thuộc job có target set được worker hỗ trợ, bằng `SELECT ... FOR UPDATE SKIP LOCKED`. Baseline hỗ trợ chính xác `targets = ['chunks']` hoặc `targets = ['embeddings']`; embedding worker đọc chunk input rồi kết thúc transaction đọc trước khi gọi Ollama. Chọn và khóa item là điểm phân xử giữa các worker.
 2. Lock order cố định là item → job → current attempt (nếu có) → current document → active derived set liên quan. Nếu transaction khóa nhiều row cùng loại, thứ tự UUID tăng dần. Không giữ document lock trong khi chờ item lock.
 3. Trong Tx1, worker khóa item rồi job, kiểm tra item còn claimable và chưa đạt `max_attempts = 3`, tạo attempt `running` với `started_at = now()` và `lease_expires_at = started_at + 60 seconds`; cùng transaction, item thành `running`, `active_attempt_id = attempt.id`, `next_retry_at = NULL`, job thành `running` và `started_at` được đặt nếu chưa có.
 4. Tx1 commit trước khi bắt đầu build. Crash trước Tx1 commit rollback toàn bộ claim; item còn queued và attempt mới không tồn tại.
