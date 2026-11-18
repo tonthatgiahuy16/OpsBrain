@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.ingestion.acl import materialize_version_acl
 from src.ingestion.canonicalization import (
     CANONICALIZATION_VERSION,
     HASH_ALGORITHM,
@@ -282,6 +283,13 @@ async def ingest_validated_document(
         )
         session.add(updated_version)
         await session.flush()
+        await materialize_version_acl(
+            session,
+            organization_id=organization_id,
+            document_pk=stored_document.id,
+            document_version_id=version_id,
+            frontmatter=accepted_frontmatter,
+        )
 
         if is_restore:
             stored_document.record_state = "active"
@@ -356,6 +364,13 @@ async def ingest_validated_document(
     )
     session.add(stored_version)
     await session.flush()
+    await materialize_version_acl(
+        session,
+        organization_id=organization_id,
+        document_pk=document_pk,
+        document_version_id=version_id,
+        frontmatter=frontmatter,
+    )
 
     stored_document.current_version_id = version_id
     await session.flush()
