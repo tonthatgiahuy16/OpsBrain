@@ -24,6 +24,7 @@ from tests.test_vector_search import _seed_embedded_document
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+TEAM_RESTRICTED = FIXTURES / "restricted-team.md"
 
 
 async def _seed_acl_documents(session: AsyncSession):
@@ -207,37 +208,36 @@ async def test_direct_user_and_active_team_grants_stop_when_team_is_disabled(
                 session, organization_id=allowed["organization_id"], principal_id=viewer.id,
             ) == {allowed["document_pk"]}
 
-            # Replace the direct grant with a team grant to test the team path.
-            direct_grant = await session.scalar(select(DocumentVersionAclEntry).where(
-                DocumentVersionAclEntry.document_version_id == allowed["version"].id,
-                DocumentVersionAclEntry.user_principal_id == viewer.id,
-            ))
-            await session.delete(direct_grant)
             team = Team(
                 id=uuid4(), organization_id=allowed["organization_id"],
                 team_key="incident-response", display_name="Incident response", status="active",
             )
             session.add(team)
             await session.flush()
+            team_document = await _seed_embedded_document(
+                session,
+                organization_id=allowed["organization_id"],
+                source_document=TEAM_RESTRICTED,
+            )
             session.add_all([
                 PrincipalTeamMembership(
                     organization_id=allowed["organization_id"], principal_id=viewer.id,
                     team_id=team.id, status="active",
                 ),
                 DocumentVersionAclEntry(
-                    organization_id=allowed["organization_id"], document_pk=allowed["document_pk"],
-                    document_version_id=allowed["version"].id, team_id=team.id,
+                    organization_id=allowed["organization_id"], document_pk=team_document["document_pk"],
+                    document_version_id=team_document["version"].id, team_id=team.id,
                 ),
             ])
             await session.flush()
             assert await resolve_readable_document_pks(
                 session, organization_id=allowed["organization_id"], principal_id=viewer.id,
-            ) == {allowed["document_pk"]}
+            ) == {allowed["document_pk"], team_document["document_pk"]}
             team.status = "disabled"
             await session.flush()
             assert await resolve_readable_document_pks(
                 session, organization_id=allowed["organization_id"], principal_id=viewer.id,
-            ) == set()
+            ) == {allowed["document_pk"]}
         finally:
             await session.close()
             await transaction.rollback()
