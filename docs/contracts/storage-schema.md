@@ -446,7 +446,9 @@ Required constraints:
 | `description` | `text` | Not null, non-empty | Ý nghĩa capability |
 | `created_at` | `timestamptz` | Not null | Thời điểm đăng ký |
 
-Baseline capability catalog gồm:
+Baseline grantable capability allowlist là tập đóng các capability có thể được
+cấp cho role. Catalog ghi nhận metadata của các capability; allowlist hiện tại
+gồm:
 
 - `document:ingest`
 - `ingestion:read`
@@ -456,7 +458,7 @@ Baseline capability catalog gồm:
 - `index:rebuild`
 - `index:read`
 
-Capability catalog do application migration quản lý. Client và frontmatter không được tự tạo capability.
+Capability catalog do application migration quản lý. Client và frontmatter không được tự tạo capability. Một catalog entry ngoài allowlist có thể được lưu cho mục đích migration/planning, nhưng không thể được cấp cho role cho tới khi migration mở rộng allowlist một cách rõ ràng.
 
 ### 9.6 `role_capabilities`
 
@@ -465,7 +467,7 @@ Capability catalog do application migration quản lý. Client và frontmatter k
 | `id` | `uuid` | Primary key | Internal grant key |
 | `organization_id` | `uuid` | Not null | Organization scope |
 | `role_id` | `uuid` | Not null | Role nhận capability |
-| `capability_key` | `text` | Not null, FK tới `capabilities.capability_key`, restrict delete | Capability được cấp |
+| `capability_key` | `text` | Not null, FK tới `capabilities.capability_key`, restrict delete, check canonical allowlist | Capability được cấp |
 | `status` | `text` | Not null, check `active`, `revoked` | Trạng thái grant |
 | `granted_by_principal_id` | `uuid` | Not null | Actor cấp quyền |
 | `revoked_by_principal_id` | `uuid` | Nullable | Actor thu hồi quyền |
@@ -477,6 +479,7 @@ Capability catalog do application migration quản lý. Client và frontmatter k
 Required constraints:
 
 - `UNIQUE (organization_id, role_id, capability_key)`.
+- `capability_key` chỉ thuộc canonical allowlist tại §9.5; mở rộng allowlist yêu cầu migration có review cập nhật đồng thời catalog và database check.
 - Role, actor cấp và actor thu hồi phải thuộc cùng organization.
 - Grant `active` yêu cầu `revoked_at` và `revoked_by_principal_id` là `null`.
 - Grant `revoked` yêu cầu `revoked_at` và `revoked_by_principal_id` có giá trị.
@@ -1385,6 +1388,7 @@ Required rules:
 - Migration không được chứa credential, DSN thật hoặc machine-local path.
 - PostgreSQL extension `vector` phải được kiểm tra hoặc tạo idempotently trước bảng sử dụng kiểu `vector`.
 - Capability catalog baseline phải được seed bằng migration có thể chạy lại an toàn.
+- Grantable capability allowlist phải được database enforce; thêm capability mới phải cập nhật catalog và allowlist trong cùng migration.
 - Schema object phải dùng naming convention nhất quán cho primary key, foreign key, unique constraint, check constraint và index.
 
 ### 15.2 Baseline creation order
