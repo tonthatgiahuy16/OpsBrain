@@ -45,6 +45,12 @@ async def test_ingestion_materializes_acl_and_review_copies_it_to_approved_versi
                 organization_id=organization_id, principal_id=viewer.id,
                 role_id=role.id, status="active",
             ))
+            # A reviewer must satisfy the current document ACL as well as the
+            # approval capability, so grant the reviewer read access too.
+            session.add(PrincipalRoleMembership(
+                organization_id=organization_id, principal_id=reviewer_id,
+                role_id=role.id, status="active",
+            ))
             document = validate_markdown_document(
                 RESTRICTED.read_text(encoding="utf-8"), source_uri=RESTRICTED.as_uri(),
             )

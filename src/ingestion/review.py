@@ -1,7 +1,8 @@
 """Transactional, idempotent document review decisions.
 
-Reviewer identity must come from trusted backend context. ACL and capability
-authorization are not implemented by this module and remain unproven.
+Reviewer identity must come from trusted backend context. This module enforces
+current document visibility and the ``document:approve`` capability before any
+write; authentication (mapping a request to a principal) stays with the caller.
 """
 
 from dataclasses import dataclass
@@ -13,6 +14,12 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from src.authorization.acl import resolve_readable_document_pks
+from src.authorization.capabilities import (
+    CapabilityDenied,
+    DocumentNotVisible,
+    principal_has_capability,
+)
 from src.ingestion.acl import copy_version_acl
 from src.ingestion.eligibility import is_pre_acl_retrieval_eligible
 
@@ -110,6 +117,27 @@ async def _find_idempotent_result(
     return ReviewResult(existing, version, True, job)
 
 
+async def _append_review_denial_audit(
+    session: AsyncSession, *, organization_id: UUID, reviewer_principal_id: UUID,
+    request_id: str, correlation_id: str | None, document_pk: UUID | None,
+    reason_code: str, details: dict[str, object],
+) -> None:
+    session.add(AuditEvent(
+        organization_id=organization_id,
+        event_type="document.review.denied",
+        outcome="denied",
+        actor_kind="principal",
+        actor_principal_id=reviewer_principal_id,
+        request_id=request_id,
+        correlation_id=correlation_id,
+        document_pk=document_pk,
+        reason_code=reason_code,
+        details=details,
+        occurred_at=datetime.now(timezone.utc),
+    ))
+    await session.flush()
+
+
 async def _append_review_audit(
     session: AsyncSession, *, organization_id: UUID, reviewer_principal_id: UUID,
     request_id: str, correlation_id: str | None, document_pk: UUID,
@@ -162,6 +190,44 @@ async def submit_review_decision(
         raise ValueError("request_id must not be blank")
     if not idempotency_key:
         raise ValueError("idempotency key must not be blank")
+
+    # Authorization precedes replay and every write: a denied actor must not
+    # learn whether a previous decision exists for this document.
+    readable_documents = await resolve_readable_document_pks(
+        session,
+        organization_id=organization_id,
+        principal_id=reviewer_principal_id,
+        active_only=True,
+    )
+    if document_pk not in readable_documents:
+        await _append_review_denial_audit(
+            session,
+            organization_id=organization_id,
+            reviewer_principal_id=reviewer_principal_id,
+            request_id=request_id,
+            correlation_id=correlation_id,
+            document_pk=None,
+            reason_code="document_not_found",
+            details={"decision": decision},
+        )
+        raise DocumentNotVisible()
+    if not await principal_has_capability(
+        session,
+        organization_id=organization_id,
+        principal_id=reviewer_principal_id,
+        capability="document:approve",
+    ):
+        await _append_review_denial_audit(
+            session,
+            organization_id=organization_id,
+            reviewer_principal_id=reviewer_principal_id,
+            request_id=request_id,
+            correlation_id=correlation_id,
+            document_pk=document_pk,
+            reason_code="approval_forbidden",
+            details={"required_capability": "document:approve", "decision": decision},
+        )
+        raise CapabilityDenied("document:approve")
 
     key_hash = _sha256(idempotency_key.encode("utf-8"))
     payload_hash = _payload_hash(

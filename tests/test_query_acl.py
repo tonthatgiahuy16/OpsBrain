@@ -20,6 +20,7 @@ from src.models.storage import (
     Team,
 )
 from src.main import app
+from tests.support import grant_capability
 from tests.test_vector_search import _seed_embedded_document
 
 
@@ -86,6 +87,10 @@ async def _seed_acl_documents(session: AsyncSession):
         ),
     ])
     await session.flush()
+    await grant_capability(
+        session, organization_id=allowed["organization_id"],
+        principal_id=viewer.id, capability="query:execute",
+    )
     return allowed, blocked, viewer, role
 
 

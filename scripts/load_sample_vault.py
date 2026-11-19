@@ -6,6 +6,7 @@ normal reindex work; it does not fabricate embeddings when Ollama is offline.
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -17,7 +18,14 @@ from src.ingestion.chunking import CHUNKING_VERSION
 from src.ingestion.frontmatter import validate_markdown_document
 from src.ingestion.lifecycle import ingest_validated_document
 from src.ingestion.review import submit_review_decision
-from src.models.storage import DerivedConfiguration, Organization, Principal
+from src.models.storage import (
+    DerivedConfiguration,
+    Organization,
+    Principal,
+    PrincipalRoleMembership,
+    Role,
+    RoleCapability,
+)
 
 
 VAULT_ROOT = Path(__file__).parents[1] / "data" / "sample-vault"
@@ -55,6 +63,53 @@ async def _organization_and_principals(session):
     )
 
 
+async def _grant_reviewer_capability(
+    session, *, organization_id: UUID, reviewer_id: UUID, granted_by_principal_id: UUID,
+) -> None:
+    role = await session.scalar(select(Role).where(
+        Role.organization_id == organization_id,
+        Role.role_key == "sample-vault-reviewer",
+    ))
+    if role is None:
+        role = Role(
+            id=uuid4(), organization_id=organization_id,
+            role_key="sample-vault-reviewer", display_name="Sample vault reviewer",
+            status="active",
+        )
+        session.add(role)
+        await session.flush()
+    membership = await session.scalar(select(PrincipalRoleMembership).where(
+        PrincipalRoleMembership.organization_id == organization_id,
+        PrincipalRoleMembership.principal_id == reviewer_id,
+        PrincipalRoleMembership.role_id == role.id,
+    ))
+    if membership is None:
+        session.add(PrincipalRoleMembership(
+            organization_id=organization_id, principal_id=reviewer_id,
+            role_id=role.id, status="active",
+        ))
+    elif membership.status != "active":
+        membership.status = "active"
+    for capability_key in ("document:approve", "query:execute"):
+        capability = await session.scalar(select(RoleCapability).where(
+            RoleCapability.organization_id == organization_id,
+            RoleCapability.role_id == role.id,
+            RoleCapability.capability_key == capability_key,
+        ))
+        if capability is None:
+            session.add(RoleCapability(
+                organization_id=organization_id, role_id=role.id,
+                capability_key=capability_key, status="active",
+                granted_by_principal_id=granted_by_principal_id,
+                granted_at=datetime.now(timezone.utc),
+            ))
+        elif capability.status != "active":
+            capability.status = "active"
+            capability.revoked_at = None
+            capability.revoked_by_principal_id = None
+    await session.flush()
+
+
 async def _configuration(session, *, organization_id: UUID, principal_id: UUID, dimensions: int):
     key = "sample-vault-nomic-embed-text-v1"
     configuration = await session.scalar(select(DerivedConfiguration).where(
@@ -88,6 +143,10 @@ async def load_sample_vault(*, dimensions: int) -> int:
         raise RuntimeError(f"expected 12 sample notes, found {len(notes)}")
     async with AsyncSessionLocal() as session:
         organization, author, reviewer = await _organization_and_principals(session)
+        await _grant_reviewer_capability(
+            session, organization_id=organization.id, reviewer_id=reviewer.id,
+            granted_by_principal_id=author.id,
+        )
         configuration = await _configuration(
             session, organization_id=organization.id, principal_id=author.id,
             dimensions=dimensions,

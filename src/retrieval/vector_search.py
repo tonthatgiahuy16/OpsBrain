@@ -27,6 +27,7 @@ class EmbeddingProfile:
 class VectorSearchHit:
     chunk_id: UUID
     document_pk: UUID
+    document_version_id: UUID
     derived_set_id: UUID
     score: float
 
@@ -141,7 +142,10 @@ async def vector_top_k(
         list(query_embedding)
     ).label("distance")
     rows = (await session.execute(
-        select(Chunk.id, Chunk.document_pk, Chunk.derived_set_id, distance)
+        select(
+            Chunk.id, Chunk.document_pk, Chunk.derived_set_id,
+            DerivedSet.document_version_id, distance,
+        )
         .join(Chunk, Chunk.id == ChunkEmbedding.chunk_id)
         .join(DerivedSet, DerivedSet.id == ChunkEmbedding.derived_set_id)
         .join(Document, Document.id == Chunk.document_pk)
@@ -180,7 +184,8 @@ async def vector_top_k(
             chunk_id=row[0],
             document_pk=row[1],
             derived_set_id=row[2],
-            score=1.0 - float(row[3]),
+            document_version_id=row[3],
+            score=1.0 - float(row[4]),
         )
         for row in rows
     ]

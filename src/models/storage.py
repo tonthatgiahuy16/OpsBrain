@@ -185,6 +185,98 @@ class PrincipalRoleMembership(Base):
     )
 
 
+class Capability(Base):
+    __tablename__ = "capabilities"
+
+    capability_key = Column(Text, primary_key=True)
+    description = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(capability_key) <> ''",
+            name="capability_key_not_blank",
+        ),
+        CheckConstraint(
+            "btrim(description) <> ''",
+            name="description_not_blank",
+        ),
+    )
+
+
+class RoleCapability(Base):
+    __tablename__ = "role_capabilities"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    role_id = Column(PGUUID(as_uuid=True), nullable=False)
+    capability_key = Column(Text, nullable=False)
+    status = Column(Text, nullable=False)
+    granted_by_principal_id = Column(PGUUID(as_uuid=True), nullable=False)
+    revoked_by_principal_id = Column(PGUUID(as_uuid=True), nullable=True)
+    granted_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False,
+        server_default=func.now(), onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id"),
+        UniqueConstraint("organization_id", "role_id", "capability_key"),
+        ForeignKeyConstraint(
+            ["capability_key"], ["capabilities.capability_key"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "capability_key IN "
+            "('document:approve', 'document:ingest', 'document:read_state', "
+            "'index:read', 'index:rebuild', 'ingestion:read', 'query:execute')",
+            name="capability_key_allowlist",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "granted_by_principal_id"],
+            ["principals.organization_id", "principals.id"],
+            name="fk_role_capabilities_granted_by_principal",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "revoked_by_principal_id"],
+            ["principals.organization_id", "principals.id"],
+            name="fk_role_capabilities_revoked_by_principal",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "role_id"],
+            ["roles.organization_id", "roles.id"], ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'revoked')",
+            name="status_allowed",
+        ),
+        CheckConstraint(
+            "status <> 'active' OR "
+            "(revoked_at IS NULL AND revoked_by_principal_id IS NULL)",
+            name="active_grant_consistent",
+        ),
+        CheckConstraint(
+            "status <> 'revoked' OR "
+            "(revoked_at IS NOT NULL AND revoked_by_principal_id IS NOT NULL)",
+            name="revoked_grant_consistent",
+        ),
+        CheckConstraint(
+            "revoked_at IS NULL OR revoked_at >= granted_at",
+            name="revocation_not_before_grant",
+        ),
+        Index(
+            "ix_role_capabilities_active_role",
+            "organization_id", "role_id",
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+
 class IngestionJob(Base):
     __tablename__ = "ingestion_jobs"
 
