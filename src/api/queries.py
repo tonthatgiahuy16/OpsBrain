@@ -2,20 +2,33 @@
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from time import perf_counter
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.authorization.acl import resolve_readable_document_pks
+from src.authorization.acl import (
+    readable_document_clause,
+    resolve_readable_document_pks,
+)
+from src.authorization.capabilities import principal_has_capability
 from src.config import get_settings
 from src.database import get_db
 from src.ingestion.ollama_embeddings import OllamaEmbeddingClient, OllamaEmbeddingError
-from src.models.storage import Chunk, DerivedConfiguration, Document, DocumentVersion, Organization, Principal
+from src.models.storage import (
+    AuditEvent,
+    Chunk,
+    DerivedConfiguration,
+    Document,
+    DocumentVersion,
+    Organization,
+    Principal,
+)
 from src.retrieval.vector_search import EmbeddingProfile, active_embedding_profiles, vector_top_k
 
 
@@ -118,6 +131,56 @@ def _configuration_payload(configuration: DerivedConfiguration) -> dict[str, obj
     }
 
 
+QUERY_CAPABILITY = "query:execute"
+
+
+def _latency_payload(started: float) -> dict[str, int | None]:
+    elapsed = int((perf_counter() - started) * 1_000)
+    return {"retrieval": elapsed, "generation": None, "total": elapsed}
+
+
+async def _record_query_audit(
+    session: AsyncSession,
+    *,
+    principal: AuthenticatedPrincipal,
+    request_id: str,
+    event_type: str,
+    outcome: str,
+    details: dict[str, object],
+    reason_code: str | None = None,
+) -> None:
+    """Append one query audit event without disclosing protected content.
+
+    Disclosure policy for the query path:
+
+    - the question text, Bearer token, excerpts and raw chunk content are never
+      written; they can carry secrets and are not needed to audit the decision;
+    - identifiers and scores appear only for evidence the principal was already
+      allowed to receive in the response;
+    - candidate counts taken before ACL filtering are never written, because
+      even an aggregate count confirms that restricted material exists;
+    - a refusal records the required capability, never a document reference.
+
+    The endpoint commits the event before returning, so a denial is durable even
+    though its exception aborts the response body.
+    """
+    session.add(
+        AuditEvent(
+            organization_id=principal.organization_id,
+            event_type=event_type,
+            outcome=outcome,
+            actor_kind="principal",
+            actor_principal_id=principal.id,
+            request_id=request_id,
+            reason_code=reason_code,
+            details=details,
+            occurred_at=datetime.now(timezone.utc),
+        )
+    )
+    await session.flush()
+    await session.commit()
+
+
 @router.post("/queries")
 async def execute_query(
     request: RetrievalRequest,
@@ -126,9 +189,31 @@ async def execute_query(
 ) -> dict[str, object]:
     """Return authorized vector evidence, or abstain without disclosure.
 
-    Candidate documents are resolved from current ACL grants before vector
-    profile discovery and ranking; citations are built only from those hits.
+    Capability and ACL are independent gates: ``query:execute`` decides whether
+    the actor may query at all (403), current ACL decides which documents may
+    influence ranking, scores and citations. An actor without a capability must
+    not learn whether eligible evidence exists.
+
+    Every terminal outcome appends an audit event (contract §12.6 step 10):
+    ``query.denied``, ``query.abstained`` or ``query.executed``.
     """
+    request_id = str(uuid4())
+    if not await principal_has_capability(
+        session,
+        organization_id=principal.organization_id,
+        principal_id=principal.id,
+        capability=QUERY_CAPABILITY,
+    ):
+        await _record_query_audit(
+            session,
+            principal=principal,
+            request_id=request_id,
+            event_type="query.denied",
+            outcome="denied",
+            reason_code="query_forbidden",
+            details={"required_capability": QUERY_CAPABILITY},
+        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "query_forbidden")
     if request.response_mode == "answer":
         raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "generation_not_implemented")
     started = perf_counter()
@@ -151,7 +236,10 @@ async def execute_query(
     if profiles and profiles != [expected]:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "retrieval_unavailable")
     if not profiles:
-        return _abstention(request, configuration, started)
+        return await _abstain(
+            session, principal=principal, request_id=request_id,
+            request=request, configuration=configuration, started=started,
+        )
     try:
         client = await get_embedding_client(configuration)
         query_embedding = (await client.embed_texts([request.question]))[0]
@@ -167,26 +255,73 @@ async def execute_query(
         top_k=request.top_k,
     )
     if not hits:
-        return _abstention(request, configuration, started)
+        return await _abstain(
+            session, principal=principal, request_id=request_id,
+            request=request, configuration=configuration, started=started,
+        )
     hits = [
         hit for hit in hits
         if hit.score >= get_settings().QUERY_MIN_VECTOR_SCORE
     ]
     if not hits:
-        return _abstention(
-            request, configuration, started, reason="insufficient_evidence"
+        return await _abstain(
+            session, principal=principal, request_id=request_id,
+            request=request, configuration=configuration, started=started,
+            reason="insufficient_evidence",
+        )
+    # Re-resolve after the external embedding call. The window between the
+    # first authorization decision and citation construction must not keep
+    # citing documents whose access was revoked while Ollama was running.
+    allowed_document_pks = await resolve_readable_document_pks(
+        session,
+        organization_id=principal.organization_id,
+        principal_id=principal.id,
+    )
+    hits = [hit for hit in hits if hit.document_pk in allowed_document_pks]
+    if not hits:
+        return await _abstain(
+            session, principal=principal, request_id=request_id,
+            request=request, configuration=configuration, started=started,
         )
     evidence = []
-    for number, hit in enumerate(hits, start=1):
+    audit_evidence = []
+    for hit in hits:
+        # Re-assert authorization and bind the citation to the exact version
+        # that was embedded. Ranking and citation must describe the same
+        # record; a candidate that moved in between is dropped, never cited.
         row = await session.execute(
             select(Chunk, Document, DocumentVersion)
             .join(Document, Document.id == Chunk.document_pk)
-            .join(DocumentVersion, DocumentVersion.id == Chunk.document_version_id)
-            .where(Chunk.id == hit.chunk_id)
+            .join(Organization, Organization.id == Document.organization_id)
+            .join(DocumentVersion, DocumentVersion.id == hit.document_version_id)
+            .where(
+                Chunk.id == hit.chunk_id,
+                Chunk.document_pk == hit.document_pk,
+                Chunk.organization_id == principal.organization_id,
+                Document.organization_id == principal.organization_id,
+                Document.record_state == "active",
+                Document.current_version_id == DocumentVersion.id,
+                DocumentVersion.organization_id == principal.organization_id,
+                DocumentVersion.document_pk == Document.id,
+                DocumentVersion.review_state == "approved",
+                DocumentVersion.document_status == "active",
+                Organization.status == "active",
+                readable_document_clause(
+                    organization_id=principal.organization_id,
+                    principal_id=principal.id,
+                ),
+                (DocumentVersion.effective_from.is_(None)
+                 | (DocumentVersion.effective_from <= func.now())),
+                (DocumentVersion.effective_until.is_(None)
+                 | (DocumentVersion.effective_until > func.now())),
+            )
         )
-        chunk, document, version = row.one()
+        found = row.one_or_none()
+        if found is None:
+            continue
+        chunk, document, version = found
         evidence.append({
-            "citation_id": f"cit_{number}",
+            "citation_id": f"cit_{len(evidence) + 1}",
             "document_id": document.document_id,
             "document_version": version.version_number,
             "chunk_id": str(chunk.id),
@@ -197,8 +332,38 @@ async def execute_query(
             "scores": {"vector": hit.score, "full_text": None, "rrf": None},
             "relationship_path": [],
         })
+        # Audit only identifiers and scores of evidence that is already in the
+        # response; never the excerpt or question text.
+        audit_evidence.append({
+            "chunk_id": str(chunk.id),
+            "document_version_id": str(version.id),
+            "vector_score": round(float(hit.score), 6),
+        })
+    if not evidence:
+        return await _abstain(
+            session, principal=principal, request_id=request_id,
+            request=request, configuration=configuration, started=started,
+        )
+    latency = _latency_payload(started)
+    await _record_query_audit(
+        session,
+        principal=principal,
+        request_id=request_id,
+        event_type="query.executed",
+        outcome="succeeded",
+        details={
+            "strategy": "vector",
+            "response_mode": request.response_mode,
+            "top_k": request.top_k,
+            "retrieval_config_id": configuration.configuration_key,
+            "embedding_model": configuration.embedding_model,
+            "evidence_count": len(audit_evidence),
+            "evidence": audit_evidence,
+            "latency_ms": latency,
+        },
+    )
     return {
-        "request_id": str(uuid4()),
+        "request_id": request_id,
         "query_id": str(uuid4()),
         "status": "evidence_returned",
         "strategy_used": "vector",
@@ -208,22 +373,47 @@ async def execute_query(
         "abstention_reason": None,
         "evidence": evidence,
         "configuration": _configuration_payload(configuration),
-        "latency_ms": {
-            "retrieval": int((perf_counter() - started) * 1_000),
-            "generation": None,
-            "total": int((perf_counter() - started) * 1_000),
-        },
+        "latency_ms": latency,
     }
 
 
-def _abstention(
+async def _abstain(
+    session: AsyncSession,
+    *,
+    principal: AuthenticatedPrincipal,
+    request_id: str,
     request: RetrievalRequest,
     configuration: DerivedConfiguration,
     started: float,
     reason: str = "no_eligible_evidence",
 ) -> dict[str, object]:
+    """Return a controlled refusal and audit it as a handled outcome.
+
+    Abstention is not a server error: ``outcome`` stays ``succeeded`` and the
+    reason is recorded. No document, chunk, score or candidate count is stored,
+    so the event cannot become a side channel for restricted material.
+    """
+    latency = _latency_payload(started)
+    await _record_query_audit(
+        session,
+        principal=principal,
+        request_id=request_id,
+        event_type="query.abstained",
+        outcome="succeeded",
+        reason_code=reason,
+        details={
+            "strategy": "vector",
+            "response_mode": request.response_mode,
+            "top_k": request.top_k,
+            "retrieval_config_id": configuration.configuration_key,
+            "embedding_model": configuration.embedding_model,
+            "abstention_reason": reason,
+            "evidence_count": 0,
+            "latency_ms": latency,
+        },
+    )
     return {
-        "request_id": str(uuid4()),
+        "request_id": request_id,
         "query_id": str(uuid4()),
         "status": "abstained",
         "strategy_used": "vector",
@@ -233,9 +423,5 @@ def _abstention(
         "abstention_reason": reason,
         "evidence": [],
         "configuration": _configuration_payload(configuration),
-        "latency_ms": {
-            "retrieval": int((perf_counter() - started) * 1_000),
-            "generation": None,
-            "total": int((perf_counter() - started) * 1_000),
-        },
+        "latency_ms": latency,
     }

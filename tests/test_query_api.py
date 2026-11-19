@@ -8,6 +8,7 @@ from src.config import Settings
 from src.database import get_db
 from src.models.storage import Principal
 from src.main import app
+from tests.support import grant_capability
 from tests.test_vector_search import _seed_embedded_document
 
 
@@ -24,6 +25,12 @@ async def test_query_endpoint_returns_authorized_evidence_and_citation(
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
             seeded = await _seed_embedded_document(session)
+            await grant_capability(
+                session,
+                organization_id=seeded["organization_id"],
+                principal_id=seeded["configuration"].created_by_principal_id,
+                capability="query:execute",
+            )
 
             async def fake_db():
                 yield session
@@ -70,6 +77,12 @@ async def test_query_endpoint_abstains_without_active_evidence(
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
             seeded = await _seed_embedded_document(session)
+            await grant_capability(
+                session,
+                organization_id=seeded["organization_id"],
+                principal_id=seeded["configuration"].created_by_principal_id,
+                capability="query:execute",
+            )
             seeded["derived_set"].is_active = False
             await session.flush()
 
@@ -110,6 +123,12 @@ async def test_query_auth_rejects_missing_invalid_and_disabled_local_token(
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
             seeded = await _seed_embedded_document(session)
+            await grant_capability(
+                session,
+                organization_id=seeded["organization_id"],
+                principal_id=seeded["configuration"].created_by_principal_id,
+                capability="query:execute",
+            )
 
             async def fake_db():
                 yield session
