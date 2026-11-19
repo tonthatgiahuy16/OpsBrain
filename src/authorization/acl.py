@@ -16,15 +16,10 @@ from src.models.storage import (
 )
 
 
-async def resolve_readable_document_pks(
-    session: AsyncSession, *, organization_id: UUID, principal_id: UUID,
-) -> set[UUID]:
-    """Return current documents readable by a principal in one organization.
+def readable_document_clause(*, organization_id: UUID, principal_id: UUID):
+    """Return the SQL predicate enforcing current document ACL visibility.
 
-    Organization-scoped documents are visible to an authenticated principal in
-    the organization. Restricted documents require an exact direct grant or an
-    active membership in an active team or role granted on the current version.
-    The result is an allowlist intended for candidate filtering before ranking.
+    Requires ``Document`` and ``DocumentVersion`` to be present in the query.
     """
     active_team_ids = (
         select(PrincipalTeamMembership.team_id)
@@ -60,15 +55,35 @@ async def resolve_readable_document_pks(
             ),
         )
     )
-    return set((await session.scalars(
+    return or_(
+        DocumentVersion.access_scope == "organization",
+        (DocumentVersion.access_scope == "restricted") & matching_restricted_grant,
+    )
+
+
+async def resolve_readable_document_pks(
+    session: AsyncSession, *, organization_id: UUID, principal_id: UUID,
+    active_only: bool = False,
+) -> set[UUID]:
+    """Return current documents readable by a principal in one organization.
+
+    Organization-scoped documents are visible to an authenticated principal in
+    the organization. Restricted documents require an exact direct grant or an
+    active membership in an active team or role granted on the current version.
+    The result is an allowlist intended for candidate filtering before ranking.
+    """
+    statement = (
         select(Document.id)
         .join(DocumentVersion, DocumentVersion.id == Document.current_version_id)
         .where(
             Document.organization_id == organization_id,
             DocumentVersion.organization_id == organization_id,
-            or_(
-                DocumentVersion.access_scope == "organization",
-                (DocumentVersion.access_scope == "restricted") & matching_restricted_grant,
+            readable_document_clause(
+                organization_id=organization_id,
+                principal_id=principal_id,
             ),
         )
-    )).all())
+    )
+    if active_only:
+        statement = statement.where(Document.record_state == "active")
+    return set((await session.scalars(statement)).all())

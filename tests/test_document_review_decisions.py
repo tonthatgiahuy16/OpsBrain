@@ -9,6 +9,7 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.authorization.capabilities import CapabilityDenied, DocumentNotVisible
 from src.ingestion.frontmatter import validate_markdown_document
 from src.ingestion.lifecycle import ingest_validated_document
 from src.ingestion.review import submit_review_decision
@@ -20,8 +21,11 @@ from src.models.storage import (
     Organization,
     Principal,
     DerivedConfiguration,
+    PrincipalRoleMembership,
     ReindexJob,
     ReindexJobItem,
+    Role,
+    RoleCapability,
 )
 
 
@@ -33,6 +37,7 @@ SAMPLE = (
 
 async def _seed(session: AsyncSession):
     organization_id, author_id, reviewer_id = uuid4(), uuid4(), uuid4()
+    reviewer_role_id = uuid4()
     session.add_all([
         Organization(
             id=organization_id,
@@ -49,8 +54,27 @@ async def _seed(session: AsyncSession):
             principal_key=f"reviewer-{reviewer_id}", principal_kind="user",
             display_name="Reviewer", status="active",
         ),
+        Role(
+            id=reviewer_role_id, organization_id=organization_id,
+            role_key=f"reviewer-{reviewer_role_id}", display_name="Reviewer",
+            status="active",
+        ),
     ])
     await session.flush()
+    session.add_all([
+        PrincipalRoleMembership(
+            organization_id=organization_id, principal_id=reviewer_id,
+            role_id=reviewer_role_id, status="active",
+        ),
+        RoleCapability(
+            organization_id=organization_id, role_id=reviewer_role_id,
+            capability_key="document:approve", status="active",
+            granted_by_principal_id=author_id,
+            granted_at=datetime.now(timezone.utc),
+        ),
+    ])
+    await session.flush()
+
     parsed = validate_markdown_document(
         SAMPLE.read_text(encoding="utf-8"), source_uri=SAMPLE.as_uri()
     )
@@ -73,6 +97,33 @@ async def _seed(session: AsyncSession):
     session.add(configuration)
     await session.flush()
     return organization_id, author_id, reviewer_id, ingested, configuration
+
+
+async def _grant_capability(
+    session: AsyncSession, *, organization_id, principal_id,
+    capability: str = "document:approve",
+):
+    role = Role(
+        id=uuid4(), organization_id=organization_id,
+        role_key=f"grant-{uuid4()}", display_name="Capability grant",
+        status="active",
+    )
+    session.add(role)
+    await session.flush()
+    session.add_all([
+        PrincipalRoleMembership(
+            organization_id=organization_id, principal_id=principal_id,
+            role_id=role.id, status="active",
+        ),
+        RoleCapability(
+            organization_id=organization_id, role_id=role.id,
+            capability_key=capability, status="active",
+            granted_by_principal_id=principal_id,
+            granted_at=datetime.now(timezone.utc),
+        ),
+    ])
+    await session.flush()
+    return role
 
 
 def _make_child_version(
@@ -294,7 +345,7 @@ async def test_eligible_approval_rejects_invalid_configuration_without_partial_w
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("not_eligible", ["future", "expired", "organization_disabled", "deprecated"])
+@pytest.mark.parametrize("not_eligible", ["future", "expired", "deprecated"])
 async def test_approved_but_pre_acl_ineligible_review_does_not_enqueue(
     migration_database_engine, not_eligible,
 ):
@@ -303,8 +354,6 @@ async def test_approved_but_pre_acl_ineligible_review_does_not_enqueue(
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
             organization_id, _, reviewer_id, ingested, _ = await _seed(session)
-            document = await session.get(Document, ingested.document_pk)
-            organization = await session.get(Organization, organization_id)
             reviewed = await session.get(DocumentVersion, ingested.document_version_id)
             now = datetime.now(timezone.utc)
             if not_eligible == "future":
@@ -312,8 +361,6 @@ async def test_approved_but_pre_acl_ineligible_review_does_not_enqueue(
             elif not_eligible == "expired":
                 reviewed.effective_from = None
                 reviewed.effective_until = now - timedelta(days=1)
-            elif not_eligible == "organization_disabled":
-                organization.status = "disabled"
             elif not_eligible == "deprecated":
                 reviewed.document_status = "deprecated"
             await session.flush()
@@ -339,6 +386,42 @@ async def test_approved_but_pre_acl_ineligible_review_does_not_enqueue(
 
 
 @pytest.mark.asyncio
+async def test_disabled_organization_is_denied_before_review_or_enqueue(
+    migration_database_engine,
+):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            organization_id, _, reviewer_id, ingested, _ = await _seed(session)
+            organization = await session.get(Organization, organization_id)
+            organization.status = "disabled"
+            await session.flush()
+
+            with pytest.raises(CapabilityDenied, match="document:approve"):
+                await submit_review_decision(
+                    session, organization_id=organization_id,
+                    document_pk=ingested.document_pk,
+                    expected_version_id=ingested.document_version_id,
+                    reviewer_principal_id=reviewer_id, decision="approve",
+                    reason="Disabled organization", request_id="ineligible-organization-disabled",
+                    idempotency_key="ineligible-key-organization-disabled",
+                )
+            assert await session.scalar(select(func.count()).select_from(DocumentReviewDecision)) == 0
+            assert await session.scalar(select(func.count()).select_from(ReindexJob)) == 0
+            assert await session.scalar(select(func.count()).select_from(ReindexJobItem)) == 0
+            denied = await session.scalar(
+                select(AuditEvent).where(AuditEvent.request_id == "ineligible-organization-disabled")
+            )
+            assert denied is not None
+            assert denied.event_type == "document.review.denied"
+            assert denied.reason_code == "approval_forbidden"
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
 async def test_deleted_document_is_rejected_before_review_or_enqueue(migration_database_engine):
     async with migration_database_engine.connect() as connection:
         transaction = await connection.begin()
@@ -351,7 +434,7 @@ async def test_deleted_document_is_rejected_before_review_or_enqueue(migration_d
             document.deleted_at = now
             document.deleted_by_principal_id = reviewer_id
             await session.flush()
-            with pytest.raises(ValueError, match="active document not found"):
+            with pytest.raises(DocumentNotVisible):
                 await submit_review_decision(
                     session, organization_id=organization_id,
                     document_pk=ingested.document_pk,
@@ -363,7 +446,13 @@ async def test_deleted_document_is_rejected_before_review_or_enqueue(migration_d
             assert await session.scalar(select(func.count()).select_from(DocumentReviewDecision)) == 0
             assert await session.scalar(select(func.count()).select_from(ReindexJob)) == 0
             assert await session.scalar(select(func.count()).select_from(ReindexJobItem)) == 0
-            assert await session.scalar(select(func.count()).select_from(AuditEvent).where(AuditEvent.request_id == "deleted-review")) == 0
+            denied = await session.scalar(
+                select(AuditEvent).where(AuditEvent.request_id == "deleted-review")
+            )
+            assert denied is not None
+            assert denied.event_type == "document.review.denied"
+            assert denied.reason_code == "document_not_found"
+            assert denied.document_pk is None
         finally:
             await session.close()
             await transaction.rollback()
@@ -395,6 +484,10 @@ async def test_reject_invalidates_a_previously_active_derived_set(
                 display_name="Reviewer", status="active",
             ))
             await session.flush()
+            await _grant_capability(
+                session, organization_id=organization_id,
+                principal_id=reviewer_id,
+            )
             values = {
                 column.key: getattr(prior_version, column.key)
                 for column in DocumentVersion.__table__.columns
@@ -442,6 +535,11 @@ async def test_review_rejects_author_and_stale_version_without_writes(
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
             organization_id, author_id, reviewer_id, ingested, _ = await _seed(session)
+            # The author needs the capability too, otherwise capability is the
+            # first refusal and independence is never exercised.
+            await _grant_capability(
+                session, organization_id=organization_id, principal_id=author_id,
+            )
             common = dict(
                 organization_id=organization_id,
                 document_pk=ingested.document_pk,
