@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.ingestion.acl import materialize_version_acl
+from src.ingestion.acl import copy_version_acl, materialize_version_acl
 from src.ingestion.canonicalization import (
     CANONICALIZATION_VERSION,
     HASH_ALGORITHM,
@@ -117,6 +117,19 @@ async def delete_document(
     )
     session.add(tombstone)
     await session.flush()
+
+    if current_version.access_scope == "restricted":
+        # A tombstone is a new version, and every restricted version must carry
+        # its own ACL snapshot. Dropping the snapshot here would either leak the
+        # restricted document (no entries to check) or make deletion impossible;
+        # the deferred constraint trigger rejects the version either way.
+        await copy_version_acl(
+            session,
+            organization_id=organization_id,
+            document_pk=stored_document.id,
+            source_version_id=current_version.id,
+            target_version_id=tombstone_id,
+        )
 
     stored_document.record_state = "deleted"
     stored_document.deleted_at = datetime.now(timezone.utc)

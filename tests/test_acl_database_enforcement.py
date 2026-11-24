@@ -4,7 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, text, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,17 +62,37 @@ async def test_deferred_acl_scope_invariants_reject_invalid_snapshots(
         session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
             organization_id, author_id, _, organization_document, _ = await _seed(session)
+            parent = await session.scalar(
+                select(DocumentVersion).where(
+                    DocumentVersion.id == organization_document.document_version_id
+                )
+            )
 
             with pytest.raises(
                 DBAPIError,
                 match="restricted document version requires ACL entry",
             ):
                 async with session.begin_nested():
-                    await session.execute(
-                        update(DocumentVersion)
-                        .where(DocumentVersion.id == organization_document.document_version_id)
-                        .values(access_scope="restricted")
-                    )
+                    session.add(DocumentVersion(
+                        **{
+                            column.key: getattr(parent, column.key)
+                            for column in DocumentVersion.__table__.columns
+                            if column.key not in {
+                                "id",
+                                "created_at",
+                                "version_number",
+                                "parent_version_id",
+                                "access_scope",
+                                "change_kind",
+                            }
+                        },
+                        id=uuid4(),
+                        version_number=parent.version_number + 1,
+                        parent_version_id=parent.id,
+                        access_scope="restricted",
+                        change_kind="content_update",
+                    ))
+                    await session.flush()
                     await session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
 
             with pytest.raises(
@@ -173,7 +193,7 @@ async def test_hard_delete_of_acl_protected_version_is_rejected(
                 organization_id=organization_id,
                 author_id=author_id,
             )
-            with pytest.raises(DBAPIError, match="foreign key constraint"):
+            with pytest.raises(DBAPIError, match="document versions are immutable"):
                 async with session.begin_nested():
                     await session.execute(
                         delete(DocumentVersion).where(

@@ -2,7 +2,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.exc import DBAPIError
 
@@ -15,8 +15,10 @@ from src.models.storage import (
     AuditEvent,
     Document,
     DocumentVersion,
+    DocumentVersionAclEntry,
     Organization,
     Principal,
+    Role,
 )
 
 
@@ -28,6 +30,8 @@ SAMPLE_DOCUMENT = (
     / "services"
     / "fraud-service.md"
 )
+
+RESTRICTED_DOCUMENT = Path(__file__).parent / "fixtures" / "restricted-allowed.md"
 
 
 @pytest.mark.asyncio
@@ -145,6 +149,127 @@ async def test_delete_creates_tombstone_and_audit(
             assert delete_event.document_pk == created.document_pk
             assert delete_event.document_version_id == tombstone.id
             assert delete_event.details == {}
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_delete_restricted_document_copies_acl_snapshot(
+    database_engine: AsyncEngine,
+):
+    """A restricted tombstone must carry the ACL snapshot of its source version.
+
+    Deleting a restricted document without copying ACL entries violates the
+    deferred ``restricted document version requires ACL entry`` constraint, so
+    the lifecycle would be unable to revoke exactly the documents that most
+    need revocation.
+    """
+    organization_id = uuid4()
+    principal_id = uuid4()
+    role_id = uuid4()
+    role_key = f"incident-reader-{role_id}"
+
+    markdown = RESTRICTED_DOCUMENT.read_text(encoding="utf-8").replace(
+        "incident-reader",
+        role_key,
+    )
+    document = validate_markdown_document(
+        markdown,
+        source_uri=RESTRICTED_DOCUMENT.as_uri(),
+    )
+
+    async with database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+
+        try:
+            session.add_all(
+                [
+                    Organization(
+                        id=organization_id,
+                        organization_key=f"test-{organization_id}",
+                        display_name="Restricted Tombstone Organization",
+                        status="active",
+                    ),
+                    Principal(
+                        id=principal_id,
+                        organization_id=organization_id,
+                        principal_key=f"test-user-{principal_id}",
+                        principal_kind="user",
+                        display_name="Restricted Tombstone User",
+                        status="active",
+                    ),
+                    Role(
+                        id=role_id,
+                        organization_id=organization_id,
+                        role_key=role_key,
+                        display_name="Restricted Tombstone Reader",
+                        status="active",
+                    ),
+                ]
+            )
+            await session.flush()
+
+            created = await ingest_validated_document(
+                session,
+                organization_id=organization_id,
+                actor_principal_id=principal_id,
+                document=document,
+            )
+
+            await delete_document(
+                session,
+                organization_id=organization_id,
+                actor_principal_id=principal_id,
+                document_id="restricted-allowed",
+            )
+            await session.flush()
+            # Force the deferred ACL snapshot checks now instead of at commit,
+            # then keep the transaction open so the assertion is the only
+            # statement that can fail.
+            await session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+
+            versions = (
+                await session.scalars(
+                    select(DocumentVersion)
+                    .where(
+                        DocumentVersion.organization_id == organization_id,
+                        DocumentVersion.document_pk == created.document_pk,
+                    )
+                    .order_by(DocumentVersion.version_number)
+                )
+            ).all()
+            entries = (
+                await session.scalars(
+                    select(DocumentVersionAclEntry).where(
+                        DocumentVersionAclEntry.organization_id
+                        == organization_id,
+                        DocumentVersionAclEntry.document_pk
+                        == created.document_pk,
+                    )
+                )
+            ).all()
+
+            assert len(versions) == 2
+            original, tombstone = versions
+            assert tombstone.change_kind == "delete"
+            assert tombstone.access_scope == "restricted"
+
+            original_entries = [
+                entry for entry in entries
+                if entry.document_version_id == original.id
+            ]
+            tombstone_entries = [
+                entry for entry in entries
+                if entry.document_version_id == tombstone.id
+            ]
+
+            assert len(original_entries) == 1
+            assert len(tombstone_entries) == 1
+            assert tombstone_entries[0].role_id == role_id
+            assert tombstone_entries[0].user_principal_id is None
+            assert tombstone_entries[0].team_id is None
         finally:
             await session.close()
             await transaction.rollback()
