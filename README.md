@@ -6,7 +6,7 @@ The project is implemented as small, tested vertical slices. This README disting
 
 ## 1. Current status
 
-Remote merged checkpoint: `2026-11-05`, merge commit `4630a50` on `origin/main` (Pull Request #36). The local `main` snapshot documented here additionally contains eight unpushed commits through `603e24e` on `2026-11-18`, covering the embedding, vector-query, baseline-evaluation, and initial query-ACL slices. It must not be described as merged or deployed until it is pushed and merged through the normal review flow.
+Remote merged checkpoint: `2026-11-24`, merge commit `78d0999` on `origin/main` (Pull Request #44). Pull Requests #41-#44 added GitHub Actions verification, document-history integrity enforcement, audited capability administration, and the ACL-safe reindex API. This checkpoint is not a production deployment claim.
 
 ### Implemented and tested
 
@@ -26,19 +26,27 @@ Remote merged checkpoint: `2026-11-05`, merge commit `4630a50` on `origin/main` 
 - `POST /api/v1/queries` in `evidence_only` mode. It resolves the local authenticated principal, filters readable documents before profile discovery and vector ranking, returns citations/evidence, and abstains when no eligible evidence remains or scores are below the configured threshold. `answer` mode explicitly returns `501` until generation is implemented.
 - Vector top-k retrieval scoped to organization, active/current/approved temporal eligibility, embedding profile, and the caller-supplied authorized document set.
 - Initial user/team/role ACL storage and resolver. Restricted-version grants are materialized from validated frontmatter during ingestion and copied to the review-transition version; query retrieval uses the resolver before ranking and citation construction.
-- A 12-note synthetic sample-vault loader, a frozen 12-question vector-only baseline dataset, raw baseline responses, and an ACL-sensitive question dataset with multi-principal runner support.
+- Capability catalog and role-capability grants with a database allowlist; `document:approve` is enforced after visibility at review, while `query:execute` is enforced before vector retrieval and citations are re-authorized after embedding.
+- A 12-note synthetic sample-vault loader, a frozen 12-question vector-only baseline dataset, raw baseline responses, an ACL-sensitive question dataset, and a separate gold v1.1 dataset with section/category evaluation support.
+
+### Recent merged M5 and CI additions
+
+- Tombstone deletion copies a restricted version's ACL snapshot to its tombstone version.
+- Migration `f3a9d2c7b518` revokes request-path mutation privileges for document versions/chunks and hard delete for documents; database triggers reject document-version, chunk, and document hard deletes for privileged connections as well.
+- A privileged, audited CLI/operator path grants and revokes role capabilities; it is intentionally outside the API process.
+- `POST /api/v1/reindex-jobs` enforces `index:rebuild`, accepts only worker-supported singleton targets (`chunks` or `embeddings`), requires idempotency, and queues only documents currently readable by the requester. Its replay and `GET` paths re-filter job items and counts under the caller's current ACL.
+- A GitHub Actions workflow provisions PostgreSQL/pgvector plus the dedicated concurrency database, runs migrations, Alembic check, the full suite, and PR/push diff-format checks. The workflow passed on Pull Requests #41-#44.
 
 ### Latest recorded evidence
 
-For merge commit `4630a50`, the focused reindex worker and storage suite passed with `19 passed`. The Docker full suite passed with the dedicated concurrency database enabled: `146 passed`. `python -m alembic check` reported `No new upgrade operations detected`, and `git diff --check` was clean. The local database migration head was `b719c0e4a216`.
+For merged checkpoint `78d0999` (PR #44), Huy reported `tests/test_reindex_api.py -v`: `9 passed, 4 warnings in 1.87s`; full `pytest -q` across `opsbrain_test` and `opsbrain_concurrency_test`: `261 passed, 6 warnings in 49.84s`; and `git diff --check` exit code `0`. The migration head is `f3a9d2c7b518`. GitHub Actions passed on Pull Requests #41-#44. These are test-environment results, not production migration or deployment evidence.
 
-For the local, unmerged `2026-11-18` slices, recorded evidence is deliberately narrower:
+Earlier merged evidence remains traceable in `docs/project/CURRENT_STATUS.md`. Key retrieval/runtime evidence is:
 
 - A host Ollama probe and a container-to-host probe returned model `nomic-embed-text`, one embedding, and dimension `768`.
 - The synthetic sample-vault loader reported `ingested=12 approved_or_replayed=12 reindex_jobs=12`; the local worker runner subsequently reported `chunks=12 embeddings=12`.
 - The frozen EN vector-only baseline is recorded in [docs/evaluation/runs/VECTOR_BASELINE_2026-11-18.md](docs/evaluation/runs/VECTOR_BASELINE_2026-11-18.md): Recall@5 `84.62%` (11/13 expected documents), strict document-level citation proxy `34.00%`, and abstention accuracy `83.33%`. This is a synthetic-corpus baseline, not a generalization or production-quality claim.
-- The focused ACL lifecycle/query suite passed with `6 passed in 4.30s`; the evaluation CLI exposes `--tokens-json` for role-specific ACL cases. This is not a replacement for a fresh full-suite run after the ACL slices.
-- The current Alembic code head is `f1a9c3d7e5b2` (query ACL storage). Applying it to every runtime database remains an operational verification step.
+- PR #39 evidence includes a full suite on a newly migrated temporary database: `237 passed, 2 skipped, 1 warning`, plus two separately run concurrency-race tests. Current capability migration head is `d8a4f6b2c1e7`.
 
 Older evidence below is retained for historical checkpoints and is not a statement of the current suite size.
 
@@ -64,12 +72,12 @@ These are repository-recorded results for the stated commit and development envi
 
 - Shared request-level idempotency across API/job workflows and production error classification for database/network failures.
 - FastAPI ingestion endpoint, request-level idempotency across API/job workflows, and the remaining document/review endpoints from the minimal API contract.
-- Complete capability enforcement for review and activation; ACL enforcement beyond current vector candidates/citations, including graph traversal, context construction, and generation.
+- Capability enforcement for ingestion; ACL enforcement beyond current review, reindex jobs, and vector candidates/citations, including graph traversal, context construction, and generation.
 - Full-text and relationship workers, worker heartbeat, and recovery after external side effects.
 - Ollama answer generation and a supported `response_mode: answer` path.
 - PostgreSQL full-text search, reciprocal rank fusion, bounded graph expansion, and their evaluation.
-- A fresh complete test-suite, migration, and end-to-end verification for the local unmerged embedding/query/ACL slices.
-- Obsidian integration, a complete CI pipeline, machine-readable structured logging, and backup/restore evidence.
+- Production migration verification and fresh end-to-end runtime verification for every non-test database.
+- Obsidian integration, machine-readable structured logging, and backup/restore evidence.
 
 OpsBrain is not currently a production incident-management platform and does not execute remediation or production commands.
 
@@ -248,10 +256,10 @@ python -m alembic upgrade head
 python -m alembic current
 ```
 
-At the repository snapshot documented here, expected `alembic current` output after `upgrade head` is:
+For the current merged checkpoint, expected `alembic current` output after `upgrade head` is:
 
 ```text
-f1a9c3d7e5b2 (head)
+f3a9d2c7b518 (head)
 ```
 
 Remove the migration override from the PowerShell session when finished:
