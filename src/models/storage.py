@@ -290,6 +290,7 @@ class IngestionJob(Base):
         nullable=False,
     )
     status = Column(Text, nullable=False)
+    active_attempt_id = Column(PGUUID(as_uuid=True), nullable=True)
     submitted_document_count = Column(Integer, nullable=False)
     job_error_code = Column(Text, nullable=True)
     job_error_message = Column(Text, nullable=True)
@@ -336,6 +337,21 @@ class IngestionJob(Base):
             "organization_id",
             "submitted_by_principal_id",
             "submitted_at",
+        ),
+        ForeignKeyConstraint(
+            [
+                "organization_id",
+                "id",
+                "active_attempt_id",
+            ],
+            [
+                "ingestion_job_attempts.organization_id",
+                "ingestion_job_attempts.ingestion_job_id",
+                "ingestion_job_attempts.id",
+            ],
+            name="fk_ingestion_jobs_active_attempt",
+            ondelete="RESTRICT",
+            use_alter=True,
         ),
         Index(
             "ix_ingestion_jobs_status_submitted_at",
@@ -390,6 +406,14 @@ class IngestionJob(Base):
                 "OR completed_at >= started_at"
             ),
             name="completion_not_before_start",
+        ),
+        CheckConstraint(
+            (
+                "(status = 'running' AND active_attempt_id IS NOT NULL) "
+                "OR (status IN ('queued', 'completed', 'completed_with_errors', 'failed') "
+                "AND active_attempt_id IS NULL)"
+            ),
+            name="ck_ingestion_jobs_active_attempt_matches_status",
         ),
     )
 
@@ -559,6 +583,19 @@ class IngestionJobAttempt(Base):
             "organization_id",
             "ingestion_job_id",
             "attempt_number",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "ingestion_job_id",
+            "id",
+            name="uq_ingestion_attempt_job_ref",
+        ),
+        Index(
+            "uq_ingestion_job_attempts_running_job",
+            "organization_id",
+            "ingestion_job_id",
+            unique=True,
+            postgresql_where=text("status = 'running'"),
         ),
         ForeignKeyConstraint(
             ["organization_id", "ingestion_job_id"],
