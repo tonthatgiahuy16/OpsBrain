@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from src.authorization.rls import set_rls_context
 from src.ingestion.frontmatter import validate_markdown_document
 from src.ingestion.lifecycle import ingest_validated_document
 from src.models.storage import (
@@ -77,6 +78,9 @@ async def test_body_update_creates_version_two_and_preserves_history(
                 )
             )
             await session.flush()
+            await set_rls_context(
+                session, organization_id=organization_id, principal_id=principal_id
+            )
 
             created = await ingest_validated_document(
                 session,
@@ -246,6 +250,9 @@ async def test_metadata_only_update_creates_metadata_version(
                 )
             )
             await session.flush()
+            await set_rls_context(
+                session, organization_id=organization_id, principal_id=principal_id
+            )
 
             created = await ingest_validated_document(
                 session,
@@ -360,6 +367,9 @@ async def test_failed_update_preserves_current_version_and_history(
                 )
             )
             await session.flush()
+            await set_rls_context(
+                session, organization_id=organization_id, principal_id=principal_id
+            )
 
             created = await ingest_validated_document(
                 session,

@@ -28,6 +28,7 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://opsbrain_app:opsbrain_app_password@127.0.0.1:5432/opsbrain_test
       MIGRATION_DATABASE_URL: postgresql+asyncpg://opsbrain_owner:opsbrain_owner_password@127.0.0.1:5432/opsbrain_test
+      WORKER_DATABASE_URL: postgresql+asyncpg://opsbrain_worker:opsbrain_worker_password@127.0.0.1:5432/opsbrain_test
       OPSBRAIN_CONCURRENCY_DATABASE_URL: postgresql+asyncpg://opsbrain_owner:opsbrain_owner_password@127.0.0.1:5432/opsbrain_concurrency_test
 
     steps:
@@ -54,6 +55,8 @@ jobs:
           POSTGRES_USER: opsbrain_owner
           OPSBRAIN_APP_USER: opsbrain_app
           OPSBRAIN_APP_PASSWORD: opsbrain_app_password
+          OPSBRAIN_WORKER_USER: opsbrain_worker
+          OPSBRAIN_WORKER_PASSWORD: opsbrain_worker_password
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
           psql -h 127.0.0.1 -U opsbrain_owner -d opsbrain_test -v ON_ERROR_STOP=1 -c "CREATE DATABASE opsbrain_concurrency_test;"

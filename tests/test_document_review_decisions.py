@@ -7,6 +7,8 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import DBAPIError
+
+from src.authorization.rls import set_rls_context
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.authorization.capabilities import CapabilityDenied, DocumentNotVisible
@@ -828,6 +830,9 @@ async def test_application_role_can_submit_but_cannot_update_or_delete_decision(
         try:
             organization_id, _, reviewer_id, ingested, config = await _seed(session)
             await connection.execute(text("SET LOCAL ROLE opsbrain_app"))
+            await set_rls_context(
+                session, organization_id=organization_id, principal_id=reviewer_id
+            )
             assert await connection.scalar(text("SELECT current_user")) == "opsbrain_app"
 
             result = await submit_review_decision(

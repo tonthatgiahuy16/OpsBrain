@@ -21,6 +21,10 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://opsbrain_owner:"
         "opsbrain_owner_password@localhost:5432/opsbrain"
     )
+    WORKER_DATABASE_URL: str = (
+        "postgresql+asyncpg://opsbrain_worker:"
+        "opsbrain_worker_password@localhost:5432/opsbrain"
+    )
 
     # Ollama Local Configuration (Milestone 2+)
     OLLAMA_BASE_URL: str = "http://localhost:11434"

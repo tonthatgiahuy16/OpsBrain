@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from src.authorization.rls import set_rls_context
 from src.ingestion.canonicalization import canonical_content_hash
 from src.ingestion.frontmatter import validate_markdown_document
 from src.ingestion.lifecycle import ingest_validated_document
@@ -118,6 +119,9 @@ async def test_create_then_unchanged_replay_persists_one_version(
                 )
             )
             await session.flush()
+            await set_rls_context(
+                session, organization_id=organization_id, principal_id=principal_id
+            )
 
             created = await ingest_validated_document(
                 session,
@@ -257,6 +261,9 @@ async def test_source_move_updates_current_uri_without_new_version(
                 )
             )
             await session.flush()
+            await set_rls_context(
+                session, organization_id=organization_id, principal_id=principal_id
+            )
 
             created = await ingest_validated_document(
                 session,

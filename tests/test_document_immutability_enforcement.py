@@ -18,6 +18,7 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.authorization.rls import set_rls_context
 from src.ingestion.derived_build import build_chunk_derived_set
 from src.ingestion.frontmatter import validate_markdown_document
 from src.ingestion.lifecycle import ingest_validated_document
@@ -63,6 +64,9 @@ async def _seed_document(session: AsyncSession):
         ]
     )
     await session.flush()
+    await set_rls_context(
+        session, organization_id=organization_id, principal_id=principal_id
+    )
 
     created = await ingest_validated_document(
         session,

@@ -28,6 +28,23 @@ AsyncSessionLocal = async_sessionmaker(
     autoflush=False,
 )
 
+# Workers process jobs for every organization and must not inherit the request
+# role.  The connection string is intentionally separate so production can
+# grant this role only the DML required by worker code, plus BYPASSRLS.
+worker_engine = create_async_engine(
+    settings.WORKER_DATABASE_URL,
+    echo=(settings.LOG_LEVEL.upper() == "DEBUG"),
+    pool_pre_ping=True,
+)
+
+WorkerAsyncSessionLocal = async_sessionmaker(
+    bind=worker_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False,
+)
+
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
     "uq": "uq_%(table_name)s_%(column_0_N_name)s",

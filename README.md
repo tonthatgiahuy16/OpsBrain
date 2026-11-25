@@ -36,6 +36,7 @@ Remote merged checkpoint: `2026-11-24`, merge commit `78d0999` on `origin/main` 
 - A privileged, audited CLI/operator path grants and revokes role capabilities; it is intentionally outside the API process.
 - `POST /api/v1/reindex-jobs` enforces `index:rebuild`, accepts only worker-supported singleton targets (`chunks` or `embeddings`), requires idempotency, and queues only documents currently readable by the requester. Its replay and `GET` paths re-filter job items and counts under the caller's current ACL.
 - A GitHub Actions workflow provisions PostgreSQL/pgvector plus the dedicated concurrency database, runs migrations, Alembic check, the full suite, and PR/push diff-format checks. The workflow passed on Pull Requests #41-#44.
+- RLS hardening slice 1 introduces transaction-local organization/principal context, a hardened active-principal resolver, and fail-closed organization isolation for `documents` and `document_versions`. Background workers use the separate `opsbrain_worker` role with `BYPASSRLS`; this slice intentionally does not yet move per-document ACL enforcement into RLS.
 
 ### Latest recorded evidence
 
