@@ -55,7 +55,13 @@ class OllamaEmbeddingClient:
         }
         if self.http_client is None:
             async with httpx.AsyncClient(
-                base_url=self.base_url.rstrip("/"), timeout=30.0,
+                base_url=self.base_url.rstrip("/"),
+                timeout=30.0,
+                # Ollama is a configured local service.  Inheriting ambient
+                # HTTP(S)_PROXY variables can route it through an unrelated
+                # proxy (or require optional SOCKS support) and makes local
+                # evaluation/runtime depend on the caller's shell.
+                trust_env=False,
             ) as http_client:
                 response = await self._post_embed(http_client, payload)
         else:
