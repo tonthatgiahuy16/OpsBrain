@@ -1,0 +1,756 @@
+{
+  "run_at": "2026-11-25T10:29:12.380179+00:00",
+  "dataset_version": "gold-questions-v1.1",
+  "strategy": "vector",
+  "response_mode": "evidence_only",
+  "top_k": 5,
+  "cases": [
+    {
+      "id": "GQ-013",
+      "category": "multi-hop",
+      "answerable": true,
+      "expected_document_ids": [
+        "fraud-service",
+        "payment-service"
+      ],
+      "retrieved_expected_document_ids": [
+        "fraud-service",
+        "payment-service"
+      ],
+      "recall_at_k": 1.0,
+      "expected_sections": [
+        "fraud-service#Operational context",
+        "fraud-service#Responsibilities",
+        "payment-service#Dependencies",
+        "payment-service#Responsibilities"
+      ],
+      "retrieved_sections": [
+        "fraud-service#Operational context",
+        "payment-service-deployment-v1-4-1#Summary",
+        "checkout-service#Operational context",
+        "payment-service#Operational context",
+        "payment-service-http-503-postmortem-2026-10-01#Summary"
+      ],
+      "retrieved_expected_sections": [
+        "fraud-service#Operational context"
+      ],
+      "section_recall_at_k": 0.25,
+      "citation_correct": [
+        true,
+        false,
+        false,
+        true,
+        false
+      ],
+      "forbidden_document_ids": [],
+      "forbidden_documents_disclosed": [],
+      "leakage_surfaces": [],
+      "abstention_correct": true,
+      "response": {
+        "request_id": "d533954a-5462-4985-8b77-dafe460f0329",
+        "query_id": "34fd8fbb-fcad-414c-a063-485b09e396fc",
+        "status": "evidence_returned",
+        "strategy_used": "vector",
+        "response_mode": "evidence_only",
+        "answer": null,
+        "abstained": false,
+        "abstention_reason": null,
+        "evidence": [
+          {
+            "citation_id": "cit_1",
+            "document_id": "fraud-service",
+            "document_version": 2,
+            "chunk_id": "83cbe93d-3bbe-42f7-a96b-afac162f1932",
+            "document_type": "service",
+            "title": "Fraud Service",
+            "source_uri": "obsidian://sample-vault/payment-service/services/fraud-service.md",
+            "excerpt": "Payment Service calls Fraud Service before authorizing transactions that require risk evaluation.\n\nFraud Service was not identified as a cause of the HTTP 503 incident in the current synthetic scenario.",
+            "scores": {
+              "vector": 0.8545649647712769,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_2",
+            "document_id": "payment-service-deployment-v1-4-1",
+            "document_version": 2,
+            "chunk_id": "1aac01d4-2c6e-4d34-8068-06b7a06090fc",
+            "document_type": "deployment",
+            "title": "Payment Service Deployment v1.4.1",
+            "source_uri": "obsidian://sample-vault/payment-service/deployments/payment-service-v1-4-1.md",
+            "excerpt": "Version 1.4.1 of Payment Service was deployed as a synthetic hotfix during the HTTP 503 incident.",
+            "scores": {
+              "vector": 0.798524164889605,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_3",
+            "document_id": "checkout-service",
+            "document_version": 2,
+            "chunk_id": "c19dac05-0580-4177-b82e-2f2c602468f1",
+            "document_type": "service",
+            "title": "Checkout Service",
+            "source_uri": "obsidian://sample-vault/payment-service/services/checkout-service.md",
+            "excerpt": "During the HTTP 503 incident, some checkout requests failed because Payment Service was temporarily unavailable.\n\nCheckout Service itself remained healthy and was not identified as the source of the failure.",
+            "scores": {
+              "vector": 0.7562747176840059,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_4",
+            "document_id": "payment-service",
+            "document_version": 2,
+            "chunk_id": "9c51a56e-0b03-4ac8-a183-57a2c3a81b59",
+            "document_type": "service",
+            "title": "Payment Service",
+            "source_uri": "obsidian://sample-vault/payment-service/services/payment-service.md",
+            "excerpt": "The service is used as the central component in the sample incident scenario. A deployment introduces a configuration problem that causes HTTP 503 responses and triggers an alert.",
+            "scores": {
+              "vector": 0.7371101880210914,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_5",
+            "document_id": "payment-service-http-503-postmortem-2026-10-01",
+            "document_version": 2,
+            "chunk_id": "eb5a99e3-5360-43fe-a879-76baf2c722cb",
+            "document_type": "postmortem",
+            "title": "Payment Service HTTP 503 Postmortem",
+            "source_uri": "obsidian://sample-vault/payment-service/postmortems/payment-service-http-503-postmortem.md",
+            "excerpt": "Payment Service intermittently returned HTTP 503 responses for 31 minutes after deployment version 1.4.0 changed the database connection-pool configuration.\n\nThis postmortem describes a synthetic incident created for the OpsBrain sample vault. It contains no real customer or production data.",
+            "scores": {
+              "vector": 0.7355559379524118,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          }
+        ],
+        "configuration": {
+          "retrieval_config_id": "sample-vault-nomic-embed-text-v1",
+          "embedding_model": "nomic-embed-text",
+          "embedding_model_revision": null,
+          "embedding_dimensions": 768,
+          "generator_model": null
+        },
+        "latency_ms": {
+          "retrieval": 393,
+          "generation": null,
+          "total": 393
+        }
+      }
+    },
+    {
+      "id": "GQ-015",
+      "category": "semantic symptom",
+      "answerable": true,
+      "expected_document_ids": [
+        "payment-service-restore-reviewed-pool-config"
+      ],
+      "retrieved_expected_document_ids": [
+        "payment-service-restore-reviewed-pool-config"
+      ],
+      "recall_at_k": 1.0,
+      "expected_sections": [
+        "payment-service-restore-reviewed-pool-config#Preconditions"
+      ],
+      "retrieved_sections": [
+        "payment-service-restore-reviewed-pool-config#Preconditions",
+        "payment-service-http-503-postmortem-2026-10-01#Action items",
+        "payment-service-restore-reviewed-pool-config#Step 2 \u2014 Prepare the proposed change",
+        "payment-service-restore-reviewed-pool-config#Purpose",
+        "payment-service-503-diagnosis#Decision"
+      ],
+      "retrieved_expected_sections": [
+        "payment-service-restore-reviewed-pool-config#Preconditions"
+      ],
+      "section_recall_at_k": 1.0,
+      "citation_correct": [
+        true,
+        false,
+        true,
+        true,
+        false
+      ],
+      "forbidden_document_ids": [],
+      "forbidden_documents_disclosed": [],
+      "leakage_surfaces": [],
+      "abstention_correct": true,
+      "response": {
+        "request_id": "10d78b63-c169-47b4-b7dd-9413077caec7",
+        "query_id": "69b170f8-2c2c-478c-9a77-984bfce51d3c",
+        "status": "evidence_returned",
+        "strategy_used": "vector",
+        "response_mode": "evidence_only",
+        "answer": null,
+        "abstained": false,
+        "abstention_reason": null,
+        "evidence": [
+          {
+            "citation_id": "cit_1",
+            "document_id": "payment-service-restore-reviewed-pool-config",
+            "document_version": 2,
+            "chunk_id": "aff125e1-a181-4d4f-b766-79b823c21137",
+            "document_type": "runbook",
+            "title": "Restore Reviewed Payment Service Pool Configuration",
+            "source_uri": "obsidian://sample-vault/payment-service/runbooks/payment-service-restore-reviewed-pool-config.md",
+            "excerpt": "Before proposing recovery, confirm that:\n\n- The active deployment changed `pool_size` or `max_overflow`.\n- Application or database evidence supports connection-pool exhaustion.\n- The last reviewed configuration is known.\n- PostgreSQL capacity has been considered.\n- A rollback condition has been defined.\n\nIf these conditions are not met, stop and continue diagnosis.",
+            "scores": {
+              "vector": 0.7186936204967622,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_2",
+            "document_id": "payment-service-http-503-postmortem-2026-10-01",
+            "document_version": 2,
+            "chunk_id": "064ef335-beac-4e7a-823b-b040f3e62b09",
+            "document_type": "postmortem",
+            "title": "Payment Service HTTP 503 Postmortem",
+            "source_uri": "obsidian://sample-vault/payment-service/postmortems/payment-service-http-503-postmortem.md",
+            "excerpt": "1. Add validation for database connection-pool configuration.\n2. Add an observable metric for connection checkout wait time.\n3. Review and approve the Payment Service HTTP 503 diagnosis runbook.\n4. Add a regression test covering constrained connection-pool capacity.\n5. Require human approval before applying pool changes in the synthetic workflow.\n6. Record post-change verification before closing an incident.",
+            "scores": {
+              "vector": 0.7079241908722566,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_3",
+            "document_id": "payment-service-restore-reviewed-pool-config",
+            "document_version": 2,
+            "chunk_id": "f0f45f53-895c-4169-a042-b73d3be22be4",
+            "document_type": "runbook",
+            "title": "Restore Reviewed Payment Service Pool Configuration",
+            "source_uri": "obsidian://sample-vault/payment-service/runbooks/payment-service-restore-reviewed-pool-config.md",
+            "excerpt": "The proposal must include:\n\n- Current configuration.\n- Last reviewed configuration.\n- Supporting evidence.\n- Expected effect.\n- Deployment method.\n- Verification checks.\n- Rollback condition.\n\nFor the synthetic HTTP 503 scenario, the proposed change is to restore `pool_size` from 4 to 40 while keeping `max_overflow` at 0.",
+            "scores": {
+              "vector": 0.7021750129439681,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_4",
+            "document_id": "payment-service-restore-reviewed-pool-config",
+            "document_version": 2,
+            "chunk_id": "5914e2e1-03a5-42db-8d31-8768a84b7e38",
+            "document_type": "runbook",
+            "title": "Restore Reviewed Payment Service Pool Configuration",
+            "source_uri": "obsidian://sample-vault/payment-service/runbooks/payment-service-restore-reviewed-pool-config.md",
+            "excerpt": "Use this synthetic recovery runbook when approved evidence shows that an unsafe SQLAlchemy connection-pool change is contributing to Payment Service failures.\n\nThis procedure has not been executed against a real production Payment Service.",
+            "scores": {
+              "vector": 0.6833770538539714,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_5",
+            "document_id": "payment-service-503-diagnosis",
+            "document_version": 2,
+            "chunk_id": "9aa784ec-3398-414d-88c9-0c34c3320c60",
+            "document_type": "runbook",
+            "title": "Diagnose Payment Service HTTP 503 Errors",
+            "source_uri": "obsidian://sample-vault/payment-service/runbooks/payment-service-503-diagnosis.md",
+            "excerpt": "Connection-pool exhaustion is supported when several signals align:\n\n- HTTP 503 errors began after a pool-related change.\n- Application logs show connection acquisition timeout or pool-limit errors.\n- Connection wait time increased.\n- Restoring the previous reviewed configuration reduces the error rate.\n\nIf these signals do not align, stop using this runbook and continue with a broader HTTP 503 investigation.",
+            "scores": {
+              "vector": 0.6800279080992891,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          }
+        ],
+        "configuration": {
+          "retrieval_config_id": "sample-vault-nomic-embed-text-v1",
+          "embedding_model": "nomic-embed-text",
+          "embedding_model_revision": null,
+          "embedding_dimensions": 768,
+          "generator_model": null
+        },
+        "latency_ms": {
+          "retrieval": 349,
+          "generation": null,
+          "total": 349
+        }
+      }
+    },
+    {
+      "id": "GQ-016",
+      "category": "semantic symptom",
+      "answerable": true,
+      "expected_document_ids": [
+        "payment-service-restore-reviewed-pool-config"
+      ],
+      "retrieved_expected_document_ids": [
+        "payment-service-restore-reviewed-pool-config"
+      ],
+      "recall_at_k": 1.0,
+      "expected_sections": [
+        "payment-service-restore-reviewed-pool-config#Step 5 \u2014 Verify the result"
+      ],
+      "retrieved_sections": [
+        "payment-service-http-503-postmortem-2026-10-01#Action items",
+        "payment-service-http-503-2026-10-01#Mitigation",
+        "payment-service-restore-reviewed-pool-config#Step 2 \u2014 Prepare the proposed change",
+        "payment-service-http-503-postmortem-2026-10-01#Contributing factors",
+        "payment-service-connection-pool-saturation-alert#Safety rule"
+      ],
+      "retrieved_expected_sections": [],
+      "section_recall_at_k": 0.0,
+      "citation_correct": [
+        false,
+        false,
+        true,
+        false,
+        false
+      ],
+      "forbidden_document_ids": [],
+      "forbidden_documents_disclosed": [],
+      "leakage_surfaces": [],
+      "abstention_correct": true,
+      "response": {
+        "request_id": "15991bc9-a516-459e-a31e-1aa5d0f2ba13",
+        "query_id": "935fcebe-014e-4c07-abf7-6ac6779456ca",
+        "status": "evidence_returned",
+        "strategy_used": "vector",
+        "response_mode": "evidence_only",
+        "answer": null,
+        "abstained": false,
+        "abstention_reason": null,
+        "evidence": [
+          {
+            "citation_id": "cit_1",
+            "document_id": "payment-service-http-503-postmortem-2026-10-01",
+            "document_version": 2,
+            "chunk_id": "064ef335-beac-4e7a-823b-b040f3e62b09",
+            "document_type": "postmortem",
+            "title": "Payment Service HTTP 503 Postmortem",
+            "source_uri": "obsidian://sample-vault/payment-service/postmortems/payment-service-http-503-postmortem.md",
+            "excerpt": "1. Add validation for database connection-pool configuration.\n2. Add an observable metric for connection checkout wait time.\n3. Review and approve the Payment Service HTTP 503 diagnosis runbook.\n4. Add a regression test covering constrained connection-pool capacity.\n5. Require human approval before applying pool changes in the synthetic workflow.\n6. Record post-change verification before closing an incident.",
+            "scores": {
+              "vector": 0.7252305104366912,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_2",
+            "document_id": "payment-service-http-503-2026-10-01",
+            "document_version": 2,
+            "chunk_id": "24738f10-5f2d-413c-b696-e0b3287384cf",
+            "document_type": "incident",
+            "title": "Payment Service HTTP 503 Incident",
+            "source_uri": "obsidian://sample-vault/payment-service/incidents/payment-service-http-503.md",
+            "excerpt": "The `pool_size` setting was restored to 40 and the Payment Service instances were restarted in a controlled sequence.",
+            "scores": {
+              "vector": 0.7161266465338505,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_3",
+            "document_id": "payment-service-restore-reviewed-pool-config",
+            "document_version": 2,
+            "chunk_id": "f0f45f53-895c-4169-a042-b73d3be22be4",
+            "document_type": "runbook",
+            "title": "Restore Reviewed Payment Service Pool Configuration",
+            "source_uri": "obsidian://sample-vault/payment-service/runbooks/payment-service-restore-reviewed-pool-config.md",
+            "excerpt": "The proposal must include:\n\n- Current configuration.\n- Last reviewed configuration.\n- Supporting evidence.\n- Expected effect.\n- Deployment method.\n- Verification checks.\n- Rollback condition.\n\nFor the synthetic HTTP 503 scenario, the proposed change is to restore `pool_size` from 4 to 40 while keeping `max_overflow` at 0.",
+            "scores": {
+              "vector": 0.7154357346113215,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_4",
+            "document_id": "payment-service-http-503-postmortem-2026-10-01",
+            "document_version": 2,
+            "chunk_id": "c41422e3-15fc-4c27-90e5-5a8cd480bf01",
+            "document_type": "postmortem",
+            "title": "Payment Service HTTP 503 Postmortem",
+            "source_uri": "obsidian://sample-vault/payment-service/postmortems/payment-service-http-503-postmortem.md",
+            "excerpt": "- The pool configuration change did not receive a load-oriented validation.\n- No automated check compared the new pool size with the reviewed baseline.\n- The alert detected elevated 5xx responses but did not identify connection-pool saturation directly.\n- The diagnosis procedure had not yet been documented as a reviewed runbook.",
+            "scores": {
+              "vector": 0.6866173486061857,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_5",
+            "document_id": "payment-service-connection-pool-saturation-alert",
+            "document_version": 2,
+            "chunk_id": "90207924-7213-4fb1-b68a-8bcae1c59b6c",
+            "document_type": "alert",
+            "title": "Payment Service Connection Pool Saturation",
+            "source_uri": "obsidian://sample-vault/payment-service/alerts/payment-service-connection-pool-saturation.md",
+            "excerpt": "This alert must not automatically increase pool capacity, restart Payment Service or apply rollback. Any configuration change requires authorized human approval and post-change verification.",
+            "scores": {
+              "vector": 0.6801781273100963,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          }
+        ],
+        "configuration": {
+          "retrieval_config_id": "sample-vault-nomic-embed-text-v1",
+          "embedding_model": "nomic-embed-text",
+          "embedding_model_revision": null,
+          "embedding_dimensions": 768,
+          "generator_model": null
+        },
+        "latency_ms": {
+          "retrieval": 329,
+          "generation": null,
+          "total": 329
+        }
+      }
+    },
+    {
+      "id": "GQ-017",
+      "category": "multi-hop",
+      "answerable": true,
+      "expected_document_ids": [
+        "payment-service-http-503-2026-10-01",
+        "payment-service-restore-reviewed-pool-config"
+      ],
+      "retrieved_expected_document_ids": [
+        "payment-service-http-503-2026-10-01",
+        "payment-service-restore-reviewed-pool-config"
+      ],
+      "recall_at_k": 1.0,
+      "expected_sections": [
+        "payment-service-http-503-2026-10-01#Mitigation",
+        "payment-service-restore-reviewed-pool-config#Rollback condition"
+      ],
+      "retrieved_sections": [
+        "payment-service-restore-reviewed-pool-config#Preconditions",
+        "payment-service-connection-pool-saturation-alert#Safety rule",
+        "payment-service-http-503-2026-10-01#Mitigation",
+        "payment-service-restore-reviewed-pool-config#Step 2 \u2014 Prepare the proposed change",
+        "payment-service-http-503-postmortem-2026-10-01#Contributing factors"
+      ],
+      "retrieved_expected_sections": [
+        "payment-service-http-503-2026-10-01#Mitigation"
+      ],
+      "section_recall_at_k": 0.5,
+      "citation_correct": [
+        true,
+        false,
+        true,
+        true,
+        false
+      ],
+      "forbidden_document_ids": [],
+      "forbidden_documents_disclosed": [],
+      "leakage_surfaces": [],
+      "abstention_correct": true,
+      "response": {
+        "request_id": "1c8bd0d1-7590-483e-8cd5-36f61d113961",
+        "query_id": "55833c26-f78a-459e-9b16-9a2c8dde17ff",
+        "status": "evidence_returned",
+        "strategy_used": "vector",
+        "response_mode": "evidence_only",
+        "answer": null,
+        "abstained": false,
+        "abstention_reason": null,
+        "evidence": [
+          {
+            "citation_id": "cit_1",
+            "document_id": "payment-service-restore-reviewed-pool-config",
+            "document_version": 2,
+            "chunk_id": "aff125e1-a181-4d4f-b766-79b823c21137",
+            "document_type": "runbook",
+            "title": "Restore Reviewed Payment Service Pool Configuration",
+            "source_uri": "obsidian://sample-vault/payment-service/runbooks/payment-service-restore-reviewed-pool-config.md",
+            "excerpt": "Before proposing recovery, confirm that:\n\n- The active deployment changed `pool_size` or `max_overflow`.\n- Application or database evidence supports connection-pool exhaustion.\n- The last reviewed configuration is known.\n- PostgreSQL capacity has been considered.\n- A rollback condition has been defined.\n\nIf these conditions are not met, stop and continue diagnosis.",
+            "scores": {
+              "vector": 0.7554000999868128,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_2",
+            "document_id": "payment-service-connection-pool-saturation-alert",
+            "document_version": 2,
+            "chunk_id": "90207924-7213-4fb1-b68a-8bcae1c59b6c",
+            "document_type": "alert",
+            "title": "Payment Service Connection Pool Saturation",
+            "source_uri": "obsidian://sample-vault/payment-service/alerts/payment-service-connection-pool-saturation.md",
+            "excerpt": "This alert must not automatically increase pool capacity, restart Payment Service or apply rollback. Any configuration change requires authorized human approval and post-change verification.",
+            "scores": {
+              "vector": 0.7310528767580365,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_3",
+            "document_id": "payment-service-http-503-2026-10-01",
+            "document_version": 2,
+            "chunk_id": "24738f10-5f2d-413c-b696-e0b3287384cf",
+            "document_type": "incident",
+            "title": "Payment Service HTTP 503 Incident",
+            "source_uri": "obsidian://sample-vault/payment-service/incidents/payment-service-http-503.md",
+            "excerpt": "The `pool_size` setting was restored to 40 and the Payment Service instances were restarted in a controlled sequence.",
+            "scores": {
+              "vector": 0.7304340015284505,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_4",
+            "document_id": "payment-service-restore-reviewed-pool-config",
+            "document_version": 2,
+            "chunk_id": "f0f45f53-895c-4169-a042-b73d3be22be4",
+            "document_type": "runbook",
+            "title": "Restore Reviewed Payment Service Pool Configuration",
+            "source_uri": "obsidian://sample-vault/payment-service/runbooks/payment-service-restore-reviewed-pool-config.md",
+            "excerpt": "The proposal must include:\n\n- Current configuration.\n- Last reviewed configuration.\n- Supporting evidence.\n- Expected effect.\n- Deployment method.\n- Verification checks.\n- Rollback condition.\n\nFor the synthetic HTTP 503 scenario, the proposed change is to restore `pool_size` from 4 to 40 while keeping `max_overflow` at 0.",
+            "scores": {
+              "vector": 0.6901008096367439,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_5",
+            "document_id": "payment-service-http-503-postmortem-2026-10-01",
+            "document_version": 2,
+            "chunk_id": "c41422e3-15fc-4c27-90e5-5a8cd480bf01",
+            "document_type": "postmortem",
+            "title": "Payment Service HTTP 503 Postmortem",
+            "source_uri": "obsidian://sample-vault/payment-service/postmortems/payment-service-http-503-postmortem.md",
+            "excerpt": "- The pool configuration change did not receive a load-oriented validation.\n- No automated check compared the new pool size with the reviewed baseline.\n- The alert detected elevated 5xx responses but did not identify connection-pool saturation directly.\n- The diagnosis procedure had not yet been documented as a reviewed runbook.",
+            "scores": {
+              "vector": 0.68898880282147,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          }
+        ],
+        "configuration": {
+          "retrieval_config_id": "sample-vault-nomic-embed-text-v1",
+          "embedding_model": "nomic-embed-text",
+          "embedding_model_revision": null,
+          "embedding_dimensions": 768,
+          "generator_model": null
+        },
+        "latency_ms": {
+          "retrieval": 352,
+          "generation": null,
+          "total": 352
+        }
+      }
+    },
+    {
+      "id": "GQ-018",
+      "category": "unanswerable",
+      "answerable": false,
+      "expected_document_ids": [],
+      "retrieved_expected_document_ids": [],
+      "recall_at_k": null,
+      "expected_sections": [],
+      "retrieved_sections": [
+        "payment-service-restore-reviewed-pool-config#Preconditions",
+        "payment-service-restore-reviewed-pool-config#Step 2 \u2014 Prepare the proposed change",
+        "payment-service-http-503-postmortem-2026-10-01#Root cause",
+        "payment-service-http-503-2026-10-01#Mitigation",
+        "payment-service-deployment-v1-4-1#Configuration change"
+      ],
+      "retrieved_expected_sections": [],
+      "section_recall_at_k": null,
+      "citation_correct": [
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "forbidden_document_ids": [],
+      "forbidden_documents_disclosed": [],
+      "leakage_surfaces": [],
+      "abstention_correct": false,
+      "response": {
+        "request_id": "4de51f87-b6e0-4c47-9ce9-423687f76f22",
+        "query_id": "f952a724-647d-4a3e-99da-610155cb9cdf",
+        "status": "evidence_returned",
+        "strategy_used": "vector",
+        "response_mode": "evidence_only",
+        "answer": null,
+        "abstained": false,
+        "abstention_reason": null,
+        "evidence": [
+          {
+            "citation_id": "cit_1",
+            "document_id": "payment-service-restore-reviewed-pool-config",
+            "document_version": 2,
+            "chunk_id": "aff125e1-a181-4d4f-b766-79b823c21137",
+            "document_type": "runbook",
+            "title": "Restore Reviewed Payment Service Pool Configuration",
+            "source_uri": "obsidian://sample-vault/payment-service/runbooks/payment-service-restore-reviewed-pool-config.md",
+            "excerpt": "Before proposing recovery, confirm that:\n\n- The active deployment changed `pool_size` or `max_overflow`.\n- Application or database evidence supports connection-pool exhaustion.\n- The last reviewed configuration is known.\n- PostgreSQL capacity has been considered.\n- A rollback condition has been defined.\n\nIf these conditions are not met, stop and continue diagnosis.",
+            "scores": {
+              "vector": 0.6529774203192993,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_2",
+            "document_id": "payment-service-restore-reviewed-pool-config",
+            "document_version": 2,
+            "chunk_id": "f0f45f53-895c-4169-a042-b73d3be22be4",
+            "document_type": "runbook",
+            "title": "Restore Reviewed Payment Service Pool Configuration",
+            "source_uri": "obsidian://sample-vault/payment-service/runbooks/payment-service-restore-reviewed-pool-config.md",
+            "excerpt": "The proposal must include:\n\n- Current configuration.\n- Last reviewed configuration.\n- Supporting evidence.\n- Expected effect.\n- Deployment method.\n- Verification checks.\n- Rollback condition.\n\nFor the synthetic HTTP 503 scenario, the proposed change is to restore `pool_size` from 4 to 40 while keeping `max_overflow` at 0.",
+            "scores": {
+              "vector": 0.6517878329122135,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_3",
+            "document_id": "payment-service-http-503-postmortem-2026-10-01",
+            "document_version": 2,
+            "chunk_id": "1885d4d6-c0a0-4603-ae5d-398c87c1bbad",
+            "document_type": "postmortem",
+            "title": "Payment Service HTTP 503 Postmortem",
+            "source_uri": "obsidian://sample-vault/payment-service/postmortems/payment-service-http-503-postmortem.md",
+            "excerpt": "Deployment version 1.4.0 reduced the SQLAlchemy `pool_size` setting from 40 to 4 while keeping `max_overflow` at 0.\n\nDuring increased request volume, all four available connections were checked out. Additional requests waited for a connection and eventually timed out, after which Payment Service returned HTTP 503 in the synthetic scenario.",
+            "scores": {
+              "vector": 0.6502186940619341,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_4",
+            "document_id": "payment-service-http-503-2026-10-01",
+            "document_version": 2,
+            "chunk_id": "24738f10-5f2d-413c-b696-e0b3287384cf",
+            "document_type": "incident",
+            "title": "Payment Service HTTP 503 Incident",
+            "source_uri": "obsidian://sample-vault/payment-service/incidents/payment-service-http-503.md",
+            "excerpt": "The `pool_size` setting was restored to 40 and the Payment Service instances were restarted in a controlled sequence.",
+            "scores": {
+              "vector": 0.6477986859075389,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          },
+          {
+            "citation_id": "cit_5",
+            "document_id": "payment-service-deployment-v1-4-1",
+            "document_version": 2,
+            "chunk_id": "cfba6f2c-def7-4251-aa2f-76dc7382a832",
+            "document_type": "deployment",
+            "title": "Payment Service Deployment v1.4.1",
+            "source_uri": "obsidian://sample-vault/payment-service/deployments/payment-service-v1-4-1.md",
+            "excerpt": "The SQLAlchemy pool configuration restored `pool_size` from 4 to 40 while keeping `max_overflow` at 0.\n\nNo unrelated application behavior was intentionally changed by this synthetic hotfix.",
+            "scores": {
+              "vector": 0.6307929846027996,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          }
+        ],
+        "configuration": {
+          "retrieval_config_id": "sample-vault-nomic-embed-text-v1",
+          "embedding_model": "nomic-embed-text",
+          "embedding_model_revision": null,
+          "embedding_dimensions": 768,
+          "generator_model": null
+        },
+        "latency_ms": {
+          "retrieval": 336,
+          "generation": null,
+          "total": 336
+        }
+      }
+    }
+  ],
+  "metrics": {
+    "case_count": 5,
+    "recall_at_5_document_level": 1.0,
+    "section_recall_at_5": 0.375,
+    "answerable_cases_with_any_expected_evidence": 1.0,
+    "citation_accuracy_document_level": 0.45,
+    "abstention_accuracy": 0.8,
+    "acl_leakage_cases": [],
+    "metrics_by_category": {
+      "multi-hop": {
+        "case_count": 2,
+        "recall_at_5_document_level": 1.0,
+        "section_recall_at_5": 0.3333333333333333,
+        "answerable_cases_with_any_expected_evidence": 1.0,
+        "citation_accuracy_document_level": 0.5,
+        "abstention_accuracy": 1.0,
+        "acl_leakage_cases": []
+      },
+      "semantic symptom": {
+        "case_count": 2,
+        "recall_at_5_document_level": 1.0,
+        "section_recall_at_5": 0.5,
+        "answerable_cases_with_any_expected_evidence": 1.0,
+        "citation_accuracy_document_level": 0.4,
+        "abstention_accuracy": 1.0,
+        "acl_leakage_cases": []
+      },
+      "unanswerable": {
+        "case_count": 1,
+        "recall_at_5_document_level": null,
+        "section_recall_at_5": null,
+        "answerable_cases_with_any_expected_evidence": null,
+        "citation_accuracy_document_level": null,
+        "abstention_accuracy": 0.0,
+        "acl_leakage_cases": []
+      }
+    },
+    "failed_cases": [
+      "GQ-013",
+      "GQ-016",
+      "GQ-017",
+      "GQ-018"
+    ]
+  }
+}

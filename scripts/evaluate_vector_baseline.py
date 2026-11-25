@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from fastapi.testclient import TestClient
 from sqlalchemy import select
+from httpx import ASGITransport, AsyncClient
 
-from src.database import AsyncSessionLocal
+from src.database import AsyncSessionLocal, engine
 from src.main import app
 from src.models.storage import Chunk
 
@@ -190,19 +190,13 @@ def _metrics(cases: list[dict[str, Any]], *, top_k: int = 5) -> dict[str, Any]:
     return summary
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--dataset-version", default="gold-questions-v1")
-    parser.add_argument("--token", help="Default opaque token for cases without principal_role.")
-    parser.add_argument(
-        "--tokens-json", type=Path,
-        help="JSON object mapping each case principal_role to an opaque token.",
-    )
-    parser.add_argument("--top-k", type=int, default=5)
-    args = parser.parse_args()
+async def _run_evaluation(args: argparse.Namespace) -> None:
+    """Run HTTP requests and database enrichment on one event loop.
 
+    ``TestClient`` owns a separate AnyIO loop. Combining it with a later
+    ``asyncio.run`` leaves asyncpg connections tied to the closed loop, which
+    breaks section enrichment after otherwise successful API calls.
+    """
     tokens_by_role = (
         json.loads(args.tokens_json.read_text(encoding="utf-8"))
         if args.tokens_json else {}
@@ -210,12 +204,13 @@ def main() -> None:
     cases = _load_cases(args.dataset)
     raw_responses: list[dict[str, Any]] = []
     chunk_ids: set[str] = set()
-    with TestClient(app) as client:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
         for case in cases:
             token = tokens_by_role.get(case.get("principal_role"), args.token)
             if not isinstance(token, str) or not token:
                 raise ValueError(f"no token configured for {case['id']}")
-            http_response = client.post(
+            http_response = await client.post(
                 "/api/v1/queries",
                 headers={"Authorization": f"Bearer {token}"},
                 json={
@@ -231,7 +226,7 @@ def main() -> None:
                 if item.get("chunk_id") and not item.get("heading_path"):
                     chunk_ids.add(str(item["chunk_id"]))
 
-    chunk_sections = asyncio.run(_fetch_chunk_sections(chunk_ids)) if chunk_ids else {}
+    chunk_sections = await _fetch_chunk_sections(chunk_ids) if chunk_ids else {}
     results = [
         _evaluate_case(case, payload, chunk_sections=chunk_sections)
         for case, payload in zip(cases, raw_responses, strict=True)
@@ -248,6 +243,33 @@ def main() -> None:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--dataset-version", default="gold-questions-v1")
+    parser.add_argument("--token", help="Default opaque token for cases without principal_role.")
+    parser.add_argument(
+        "--tokens-json", type=Path,
+        help="JSON object mapping each case principal_role to an opaque token.",
+    )
+    parser.add_argument("--top-k", type=int, default=5)
+    return parser.parse_args()
+
+
+async def _main_async(args: argparse.Namespace) -> None:
+    try:
+        await _run_evaluation(args)
+    finally:
+        # The script creates the process-local engine. Disposing it before the
+        # loop closes also makes a failed run free of asyncpg loop warnings.
+        await engine.dispose()
+
+
+def main() -> None:
+    asyncio.run(_main_async(_parse_args()))
 
 
 if __name__ == "__main__":
