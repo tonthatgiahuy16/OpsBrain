@@ -16,11 +16,13 @@ from src.models.storage import (
     Organization,
     Principal,
     Role,
+    Team,
 )
 from tests.test_document_review_decisions import _seed
 
 
 RESTRICTED = Path(__file__).parent / "fixtures" / "restricted-allowed.md"
+TEAM_RESTRICTED = Path(__file__).parent / "fixtures" / "restricted-team.md"
 
 
 async def _seed_restricted_version(
@@ -203,6 +205,93 @@ async def test_hard_delete_of_acl_protected_version_is_rejected(
         finally:
             await session.close()
             await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_worker_can_resolve_team_acl_subject_during_ingestion(
+    migration_database_engine, worker_database_engine,
+):
+    """Worker ingestion must resolve ``allowed_teams`` without owner help.
+
+    The ingestion worker runs ``materialize_version_acl`` on the worker role.
+    ``teams`` is outside the explicit ``_WORKER_TABLES`` grant list, so this
+    guards the dedicated grant migration.
+    """
+    organization = Organization(
+        id=uuid4(),
+        organization_key=f"acl-worker-team-{uuid4()}",
+        display_name="ACL worker team organization",
+        status="active",
+    )
+    author = Principal(
+        id=uuid4(),
+        organization_id=organization.id,
+        principal_key=f"acl-worker-author-{uuid4()}",
+        principal_kind="user",
+        display_name="ACL worker author",
+        status="active",
+    )
+    team = Team(
+        id=uuid4(),
+        organization_id=organization.id,
+        team_key="incident-response",
+        display_name="Incident Response",
+        status="active",
+    )
+    async with AsyncSession(migration_database_engine, expire_on_commit=False) as session:
+        session.add_all([organization, author, team])
+        await session.commit()
+        organization_id = organization.id
+        author_id = author.id
+        team_id = team.id
+
+    try:
+        async with AsyncSession(
+            worker_database_engine, expire_on_commit=False
+        ) as worker_session:
+            document = validate_markdown_document(
+                TEAM_RESTRICTED.read_text(encoding="utf-8"),
+                source_uri=TEAM_RESTRICTED.as_uri(),
+            )
+            ingested = await ingest_validated_document(
+                worker_session,
+                organization_id=organization_id,
+                actor_principal_id=author_id,
+                document=document,
+            )
+            entries = list((await worker_session.scalars(
+                select(DocumentVersionAclEntry).where(
+                    DocumentVersionAclEntry.organization_id == organization_id,
+                    DocumentVersionAclEntry.document_version_id
+                    == ingested.document_version_id,
+                )
+            )).all())
+            resolved_entries = [
+                (entry.user_principal_id, entry.team_id, entry.role_id)
+                for entry in entries
+            ]
+            await worker_session.rollback()
+    finally:
+        async with migration_database_engine.begin() as cleanup:
+            # Seed rows were committed for a separately connected worker.
+            await cleanup.execute(text("SET LOCAL session_replication_role = replica"))
+            for table in (
+                "document_version_acl_entries",
+                "document_versions",
+                "documents",
+                "teams",
+                "principals",
+            ):
+                await cleanup.execute(
+                    text(f"DELETE FROM {table} WHERE organization_id = :organization_id"),
+                    {"organization_id": organization_id},
+                )
+            await cleanup.execute(
+                text("DELETE FROM organizations WHERE id = :organization_id"),
+                {"organization_id": organization_id},
+            )
+
+    assert resolved_entries == [(None, team_id, None)]
 
 
 @pytest.mark.asyncio

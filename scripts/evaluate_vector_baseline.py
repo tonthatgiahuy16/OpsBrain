@@ -3,18 +3,12 @@
 import argparse
 import asyncio
 import json
+import os
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID
-
-from sqlalchemy import select
-from httpx import ASGITransport, AsyncClient
-
-from src.database import AsyncSessionLocal, engine
-from src.main import app
-from src.models.storage import Chunk
 
 
 def _load_cases(path: Path) -> list[dict[str, Any]]:
@@ -22,7 +16,18 @@ def _load_cases(path: Path) -> list[dict[str, Any]]:
 
 
 async def _fetch_chunk_sections(chunk_ids: set[str]) -> dict[str, tuple[str, ...]]:
-    """Resolve chunk UUID strings to their stored heading_path tuples."""
+    """Resolve chunk UUID strings to their stored heading_path tuples.
+
+    Enrichment uses the dedicated worker role. ``chunk_ids`` come only from an
+    API response the principal already received, and this query reads metadata
+    (``heading_path``) rather than content, so bypassing request-scoped RLS
+    here does not widen the evaluated security surface.
+    """
+    from sqlalchemy import select
+
+    from src.database import WorkerAsyncSessionLocal
+    from src.models.storage import Chunk
+
     parsed_ids: list[UUID] = []
     for raw_id in chunk_ids:
         try:
@@ -31,7 +36,7 @@ async def _fetch_chunk_sections(chunk_ids: set[str]) -> dict[str, tuple[str, ...
             continue
     if not parsed_ids:
         return {}
-    async with AsyncSessionLocal() as session:
+    async with WorkerAsyncSessionLocal() as session:
         rows = await session.execute(
             select(Chunk.id, Chunk.heading_path).where(Chunk.id.in_(parsed_ids))
         )
@@ -197,6 +202,10 @@ async def _run_evaluation(args: argparse.Namespace) -> None:
     ``asyncio.run`` leaves asyncpg connections tied to the closed loop, which
     breaks section enrichment after otherwise successful API calls.
     """
+    from httpx import ASGITransport, AsyncClient
+
+    from src.main import app
+
     tokens_by_role = (
         json.loads(args.tokens_json.read_text(encoding="utf-8"))
         if args.tokens_json else {}
@@ -255,6 +264,14 @@ def _parse_args() -> argparse.Namespace:
         "--tokens-json", type=Path,
         help="JSON object mapping each case principal_role to an opaque token.",
     )
+    parser.add_argument(
+        "--token-map", type=Path,
+        help=(
+            "JSON object mapping opaque token to principal UUID. Sets "
+            "LOCAL_QUERY_TOKEN_MAP_JSON before the app is imported so the "
+            "mapping never has to pass through shell quoting."
+        ),
+    )
     parser.add_argument("--top-k", type=int, default=5)
     return parser.parse_args()
 
@@ -263,13 +280,21 @@ async def _main_async(args: argparse.Namespace) -> None:
     try:
         await _run_evaluation(args)
     finally:
-        # The script creates the process-local engine. Disposing it before the
+        # The script creates process-local engines. Disposing them before the
         # loop closes also makes a failed run free of asyncpg loop warnings.
+        from src.database import engine, worker_engine
+
+        await worker_engine.dispose()
         await engine.dispose()
 
 
 def main() -> None:
-    asyncio.run(_main_async(_parse_args()))
+    args = _parse_args()
+    if args.token_map is not None:
+        os.environ["LOCAL_QUERY_TOKEN_MAP_JSON"] = args.token_map.read_text(
+            encoding="utf-8"
+        ).strip()
+    asyncio.run(_main_async(args))
 
 
 if __name__ == "__main__":
