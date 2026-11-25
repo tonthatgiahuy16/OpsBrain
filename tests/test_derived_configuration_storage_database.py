@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from src.authorization.rls import set_rls_context
 from src.models.storage import (
     DerivedConfiguration,
     Organization,
@@ -43,6 +44,11 @@ async def test_derived_configuration_can_be_persisted(
                 ]
             )
             await session.flush()
+            await set_rls_context(
+                session,
+                organization_id=organization_id,
+                principal_id=principal_id,
+            )
 
             configuration = DerivedConfiguration(
                 organization_id=organization_id,
@@ -191,6 +197,11 @@ async def test_derived_configuration_can_be_persisted(
                 )
             )
             assert invalid_count == 0
+            await set_rls_context(
+                session,
+                organization_id=other_organization_id,
+                principal_id=other_principal_id,
+            )
             other_configuration = DerivedConfiguration(
                 organization_id=other_organization_id,
                 configuration_key="test-configuration",
@@ -216,7 +227,10 @@ async def test_derived_configuration_can_be_persisted(
                     ),
                 )
             )
-            assert same_key_count == 2
+            # Context is transaction-local and now belongs to the second
+            # organization; cross-org rows remain invisible even to a query
+            # that explicitly names both organization IDs.
+            assert same_key_count == 1
         finally:
             await session.close()
             await transaction.rollback()

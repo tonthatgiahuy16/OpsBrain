@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
+from src.authorization.rls import set_rls_context
 from src.models.storage import AuditEvent, Organization
 
 
@@ -21,6 +22,9 @@ async def create_audit_event(session: AsyncSession) -> AuditEvent:
         )
     )
     await session.flush()
+    await set_rls_context(
+        session, organization_id=organization_id, principal_id=uuid4(),
+    )
 
     event = AuditEvent(
         organization_id=organization_id,
@@ -59,6 +63,9 @@ async def test_audit_event_can_be_persisted_after_migration(
                 )
             )
             await session.flush()
+            await set_rls_context(
+                session, organization_id=organization_id, principal_id=uuid4(),
+            )
 
             event = AuditEvent(
                 organization_id=organization_id,

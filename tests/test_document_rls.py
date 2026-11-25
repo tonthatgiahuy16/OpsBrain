@@ -116,6 +116,9 @@ async def test_document_rls_is_fail_closed_and_organization_scoped(
             await set_rls_context(
                 connection, organization_id=organization_a_id, principal_id=principal_a_id
             )
+            # The seed documents are pending in this same transaction.  This
+            # narrow visibility is required for ORM INSERT ... RETURNING; a
+            # committed document is always ACL-gated by its current version.
             assert await connection.scalar(text("SELECT count(*) FROM documents")) == 1
             assert await connection.scalar(
                 text("SELECT count(*) FROM documents WHERE organization_id = :organization_id"),

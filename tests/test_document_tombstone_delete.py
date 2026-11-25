@@ -19,6 +19,7 @@ from src.models.storage import (
     DocumentVersionAclEntry,
     Organization,
     Principal,
+    PrincipalRoleMembership,
     Role,
 )
 
@@ -204,19 +205,31 @@ async def test_delete_restricted_document_copies_acl_snapshot(
                         display_name="Restricted Tombstone User",
                         status="active",
                     ),
-                    Role(
-                        id=role_id,
-                        organization_id=organization_id,
-                        role_key=role_key,
-                        display_name="Restricted Tombstone Reader",
-                        status="active",
-                    ),
                 ]
             )
             await session.flush()
             await set_rls_context(
                 session, organization_id=organization_id, principal_id=principal_id
             )
+            session.add(
+                Role(
+                    id=role_id,
+                    organization_id=organization_id,
+                    role_key=role_key,
+                    display_name="Restricted Tombstone Reader",
+                    status="active",
+                )
+            )
+            await session.flush()
+            session.add(
+                PrincipalRoleMembership(
+                    organization_id=organization_id,
+                    principal_id=principal_id,
+                    role_id=role_id,
+                    status="active",
+                )
+            )
+            await session.flush()
 
             created = await ingest_validated_document(
                 session,
