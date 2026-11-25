@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from src.authorization.rls import set_rls_context
 from src.models.storage import (
     IngestionJob,
     Organization,
@@ -54,6 +55,11 @@ async def test_ingestion_job_idempotency_key_is_unique_per_principal(
                 )
             )
             await session.flush()
+            await set_rls_context(
+                session,
+                organization_id=organization_id,
+                principal_id=principal_id,
+            )
 
             session.add(
                 IngestionJob(
@@ -146,6 +152,13 @@ async def test_ingestion_job_rejects_principal_from_another_organization(
                 ]
             )
             await session.flush()
+            await set_rls_context(
+                session,
+                organization_id=first_organization_id,
+                # This test exercises the FK trigger, so its context identity
+                # only establishes the organization boundary.
+                principal_id=uuid4(),
+            )
 
             with pytest.raises(IntegrityError):
                 async with session.begin_nested():
@@ -202,6 +215,11 @@ async def test_item_and_attempt_reject_invalid_terminal_states(
             )
 
             await session.flush()
+            await set_rls_context(
+                session,
+                organization_id=organization_id,
+                principal_id=principal_id,
+            )
 
             job = IngestionJob(
                 organization_id=organization_id,

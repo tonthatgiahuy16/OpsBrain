@@ -1254,6 +1254,11 @@ class DocumentVersion(Base):
             "document_pk",
             "content_hash",
         ),
+        # ACL RLS intentionally cannot make an uncommitted restricted version
+        # readable just to satisfy PostgreSQL's INSERT ... RETURNING.  Version
+        # IDs are generated in application code, so no returned server value is
+        # needed during the write path.
+        {"implicit_returning": False},
     )
 
 

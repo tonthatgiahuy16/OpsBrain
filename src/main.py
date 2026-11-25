@@ -10,6 +10,7 @@ from src import __version__
 from src.config import get_settings
 from src.database import check_database_readiness
 from src.api.ingestions import router as ingestion_router
+from src.api.documents import router as documents_router
 from src.api.queries import router as query_router
 from src.api.reindex import router as reindex_router
 from src.api.reviews import router as review_router
@@ -43,6 +44,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(ingestion_router)
+app.include_router(documents_router)
 app.include_router(query_router)
 app.include_router(reindex_router)
 app.include_router(review_router)
