@@ -2,7 +2,7 @@
 
 import asyncio
 
-from src.database import AsyncSessionLocal
+from src.database import WorkerAsyncSessionLocal
 from src.ingestion.reindex_worker import (
     process_next_chunk_reindex_item,
     process_next_embedding_reindex_item,
@@ -12,7 +12,7 @@ from src.ingestion.reindex_worker import (
 async def _drain(process) -> int:
     completed = 0
     while True:
-        async with AsyncSessionLocal() as session:
+        async with WorkerAsyncSessionLocal() as session:
             item_id = await process(session)
         if item_id is None:
             return completed

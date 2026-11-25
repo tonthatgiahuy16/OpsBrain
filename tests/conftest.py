@@ -4,7 +4,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from src.config import get_settings
-from src.database import engine
+from src.database import engine, worker_engine
 
 
 @pytest_asyncio.fixture
@@ -23,3 +23,9 @@ async def migration_database_engine() -> AsyncIterator[AsyncEngine]:
     yield migration_engine
 
     await migration_engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def worker_database_engine() -> AsyncIterator[AsyncEngine]:
+    yield worker_engine
+    await worker_engine.dispose()

@@ -6,6 +6,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.exc import DBAPIError
 
+from src.authorization.rls import set_rls_context
 from src.ingestion.frontmatter import validate_markdown_document
 from src.ingestion.lifecycle import (
     delete_document,
@@ -74,6 +75,9 @@ async def test_delete_creates_tombstone_and_audit(
                 )
             )
             await session.flush()
+            await set_rls_context(
+                session, organization_id=organization_id, principal_id=principal_id
+            )
 
             created = await ingest_validated_document(
                 session,
@@ -210,6 +214,9 @@ async def test_delete_restricted_document_copies_acl_snapshot(
                 ]
             )
             await session.flush()
+            await set_rls_context(
+                session, organization_id=organization_id, principal_id=principal_id
+            )
 
             created = await ingest_validated_document(
                 session,
@@ -328,6 +335,11 @@ async def test_delete_rejects_cross_organization_actor_without_partial_state(
                 ]
             )
             await session.flush()
+            await set_rls_context(
+                session,
+                organization_id=organization_id,
+                principal_id=owner_principal_id,
+            )
 
             created = await ingest_validated_document(
                 session,
@@ -422,6 +434,9 @@ async def test_ingest_deleted_document_creates_restore_version(
                 ]
             )
             await session.flush()
+            await set_rls_context(
+                session, organization_id=organization_id, principal_id=principal_id
+            )
 
             created = await ingest_validated_document(
                 session,

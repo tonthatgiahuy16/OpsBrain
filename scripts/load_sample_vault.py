@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import select
 
-from src.database import AsyncSessionLocal
+from src.database import WorkerAsyncSessionLocal
 from src.ingestion.chunking import CHUNKING_VERSION
 from src.ingestion.frontmatter import validate_markdown_document
 from src.ingestion.lifecycle import ingest_validated_document
@@ -141,7 +141,7 @@ async def load_sample_vault(*, dimensions: int) -> int:
     notes = sorted(VAULT_ROOT.rglob("*.md"))
     if len(notes) != 12:
         raise RuntimeError(f"expected 12 sample notes, found {len(notes)}")
-    async with AsyncSessionLocal() as session:
+    async with WorkerAsyncSessionLocal() as session:
         organization, author, reviewer = await _organization_and_principals(session)
         await _grant_reviewer_capability(
             session, organization_id=organization.id, reviewer_id=reviewer.id,

@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 : "${OPSBRAIN_APP_USER:?OPSBRAIN_APP_USER must be set}"
 : "${OPSBRAIN_APP_PASSWORD:?OPSBRAIN_APP_PASSWORD must be set}"
+: "${OPSBRAIN_WORKER_USER:?OPSBRAIN_WORKER_USER must be set}"
+: "${OPSBRAIN_WORKER_PASSWORD:?OPSBRAIN_WORKER_PASSWORD must be set}"
 
 psql \
   --username "$POSTGRES_USER" \
@@ -10,7 +12,9 @@ psql \
   --set=ON_ERROR_STOP=1 \
   --set=owner_role="$POSTGRES_USER" \
   --set=app_role="$OPSBRAIN_APP_USER" \
-  --set=app_password="$OPSBRAIN_APP_PASSWORD" <<'SQL'
+  --set=app_password="$OPSBRAIN_APP_PASSWORD" \
+  --set=worker_role="$OPSBRAIN_WORKER_USER" \
+  --set=worker_password="$OPSBRAIN_WORKER_PASSWORD" <<'SQL'
 SELECT format(
     'CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD %L',
     :'app_role',
@@ -24,20 +28,49 @@ WHERE NOT EXISTS (
 \gexec
 
 SELECT format(
+    'CREATE ROLE %I LOGIN BYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD %L',
+    :'worker_role',
+    :'worker_password'
+)
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM pg_roles
+    WHERE rolname = :'worker_role'
+)
+\gexec
+
+SELECT format(
     'GRANT CONNECT ON DATABASE %I TO %I',
     current_database(),
     :'app_role'
 )
 \gexec
 
+SELECT format(
+    'GRANT CONNECT ON DATABASE %I TO %I',
+    current_database(),
+    :'worker_role'
+)
+\gexec
+
 GRANT USAGE ON SCHEMA public TO :"app_role";
 REVOKE CREATE ON SCHEMA public FROM :"app_role";
+GRANT USAGE ON SCHEMA public TO :"worker_role";
+REVOKE CREATE ON SCHEMA public FROM :"worker_role";
 
 SELECT format(
     'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public '
     'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I',
     :'owner_role',
     :'app_role'
+)
+\gexec
+
+SELECT format(
+    'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public '
+    'GRANT SELECT, INSERT, UPDATE ON TABLES TO %I',
+    :'owner_role',
+    :'worker_role'
 )
 \gexec
 

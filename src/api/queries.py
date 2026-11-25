@@ -9,13 +9,14 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.authorization.acl import (
     readable_document_clause,
     resolve_readable_document_pks,
 )
+from src.authorization.rls import set_rls_context
 from src.authorization.capabilities import principal_has_capability
 from src.config import get_settings
 from src.database import get_db
@@ -27,7 +28,6 @@ from src.models.storage import (
     Document,
     DocumentVersion,
     Organization,
-    Principal,
 )
 from src.retrieval.vector_search import EmbeddingProfile, active_embedding_profiles, vector_top_k
 
@@ -82,18 +82,22 @@ async def get_authenticated_principal(
     except (KeyError, ValueError):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "authentication_required")
     row = await session.execute(
-        select(Principal.id, Principal.organization_id)
-        .join(Organization, Organization.id == Principal.organization_id)
-        .where(
-            Principal.id == principal_id,
-            Principal.status == "active",
-            Organization.status == "active",
-        )
+        text(
+            "SELECT id, organization_id "
+            "FROM public.app_authenticate_principal(:principal_id)"
+        ),
+        {"principal_id": principal_id},
     )
     principal = row.one_or_none()
     if principal is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "authentication_required")
-    return AuthenticatedPrincipal(id=principal[0], organization_id=principal[1])
+    authenticated = AuthenticatedPrincipal(id=principal[0], organization_id=principal[1])
+    await set_rls_context(
+        session,
+        organization_id=authenticated.organization_id,
+        principal_id=authenticated.id,
+    )
+    return authenticated
 
 
 async def get_embedding_client(

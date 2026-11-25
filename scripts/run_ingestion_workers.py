@@ -3,7 +3,7 @@
 import argparse
 import asyncio
 
-from src.database import AsyncSessionLocal
+from src.database import WorkerAsyncSessionLocal
 from src.ingestion.ingestion_worker import (
     DEFAULT_STALE_SECONDS,
     process_next_ingestion_job,
@@ -14,7 +14,7 @@ async def _drain(*, stale_after_seconds: int, max_jobs: int | None) -> int:
     processed = 0
     while max_jobs is None or processed < max_jobs:
         job_id = await process_next_ingestion_job(
-            AsyncSessionLocal,
+            WorkerAsyncSessionLocal,
             stale_after_seconds=stale_after_seconds,
         )
         if job_id is None:
