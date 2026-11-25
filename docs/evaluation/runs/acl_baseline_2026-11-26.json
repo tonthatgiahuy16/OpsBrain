@@ -1,0 +1,306 @@
+{
+  "run_at": "2026-11-25T22:29:49.124901+00:00",
+  "dataset_version": "acl-sensitive-v0",
+  "strategy": "vector",
+  "response_mode": "evidence_only",
+  "top_k": 5,
+  "cases": [
+    {
+      "id": "GQ-ACL-001",
+      "category": null,
+      "answerable": true,
+      "expected_document_ids": [
+        "restricted-allowed"
+      ],
+      "retrieved_expected_document_ids": [
+        "restricted-allowed"
+      ],
+      "recall_at_k": 1.0,
+      "expected_sections": [],
+      "retrieved_sections": [
+        "restricted-allowed#Evidence"
+      ],
+      "retrieved_expected_sections": [],
+      "section_recall_at_k": null,
+      "citation_correct": [
+        true
+      ],
+      "forbidden_document_ids": [
+        "restricted-blocked",
+        "restricted-team"
+      ],
+      "forbidden_documents_disclosed": [],
+      "leakage_surfaces": [],
+      "abstention_correct": true,
+      "response": {
+        "request_id": "ce5f7572-bafb-460c-91c8-1001235a8b3b",
+        "query_id": "cfc2f33b-5b11-4ccf-a5df-ba68403d6b1b",
+        "status": "evidence_returned",
+        "strategy_used": "vector",
+        "response_mode": "evidence_only",
+        "answer": null,
+        "abstained": false,
+        "abstention_reason": null,
+        "evidence": [
+          {
+            "citation_id": "cit_1",
+            "document_id": "restricted-allowed",
+            "document_version": 2,
+            "chunk_id": "c3a56ee0-ec86-4d16-bdfd-a90799764f67",
+            "document_type": "runbook",
+            "title": "Restricted Allowed Runbook",
+            "source_uri": "obsidian://acl-eval/restricted-allowed.md",
+            "excerpt": "Only the incident-reader role may retrieve this synthetic evidence.",
+            "scores": {
+              "vector": 0.5395968991638271,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          }
+        ],
+        "configuration": {
+          "retrieval_config_id": "acl-eval-nomic-embed-text-v1",
+          "embedding_model": "nomic-embed-text",
+          "embedding_model_revision": null,
+          "embedding_dimensions": 768,
+          "generator_model": null
+        },
+        "latency_ms": {
+          "retrieval": 206,
+          "generation": null,
+          "total": 206
+        }
+      }
+    },
+    {
+      "id": "GQ-ACL-002",
+      "category": null,
+      "answerable": false,
+      "expected_document_ids": [],
+      "retrieved_expected_document_ids": [],
+      "recall_at_k": null,
+      "expected_sections": [],
+      "retrieved_sections": [
+        "restricted-allowed#Evidence"
+      ],
+      "retrieved_expected_sections": [],
+      "section_recall_at_k": null,
+      "citation_correct": [
+        false
+      ],
+      "forbidden_document_ids": [
+        "restricted-blocked"
+      ],
+      "forbidden_documents_disclosed": [],
+      "leakage_surfaces": [],
+      "abstention_correct": false,
+      "response": {
+        "request_id": "f33ffcba-c5cf-4b4b-b362-0959c10ea57a",
+        "query_id": "9c989e30-add9-4da1-a861-457ac32906b4",
+        "status": "evidence_returned",
+        "strategy_used": "vector",
+        "response_mode": "evidence_only",
+        "answer": null,
+        "abstained": false,
+        "abstention_reason": null,
+        "evidence": [
+          {
+            "citation_id": "cit_1",
+            "document_id": "restricted-allowed",
+            "document_version": 2,
+            "chunk_id": "c3a56ee0-ec86-4d16-bdfd-a90799764f67",
+            "document_type": "runbook",
+            "title": "Restricted Allowed Runbook",
+            "source_uri": "obsidian://acl-eval/restricted-allowed.md",
+            "excerpt": "Only the incident-reader role may retrieve this synthetic evidence.",
+            "scores": {
+              "vector": 0.5292933197935472,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          }
+        ],
+        "configuration": {
+          "retrieval_config_id": "acl-eval-nomic-embed-text-v1",
+          "embedding_model": "nomic-embed-text",
+          "embedding_model_revision": null,
+          "embedding_dimensions": 768,
+          "generator_model": null
+        },
+        "latency_ms": {
+          "retrieval": 121,
+          "generation": null,
+          "total": 121
+        }
+      }
+    },
+    {
+      "id": "GQ-ACL-003",
+      "category": null,
+      "answerable": false,
+      "expected_document_ids": [],
+      "retrieved_expected_document_ids": [],
+      "recall_at_k": null,
+      "expected_sections": [],
+      "retrieved_sections": [],
+      "retrieved_expected_sections": [],
+      "section_recall_at_k": null,
+      "citation_correct": [],
+      "forbidden_document_ids": [
+        "restricted-allowed",
+        "restricted-blocked",
+        "restricted-team"
+      ],
+      "forbidden_documents_disclosed": [],
+      "leakage_surfaces": [],
+      "abstention_correct": true,
+      "response": {
+        "request_id": "f9b3a411-0153-43ac-af63-f5708032f20b",
+        "query_id": "89a72acf-8ed3-4523-973a-7773c48fe05f",
+        "status": "abstained",
+        "strategy_used": "vector",
+        "response_mode": "evidence_only",
+        "answer": null,
+        "abstained": true,
+        "abstention_reason": "no_eligible_evidence",
+        "evidence": [],
+        "configuration": {
+          "retrieval_config_id": "acl-eval-nomic-embed-text-v1",
+          "embedding_model": "nomic-embed-text",
+          "embedding_model_revision": null,
+          "embedding_dimensions": 768,
+          "generator_model": null
+        },
+        "latency_ms": {
+          "retrieval": 6,
+          "generation": null,
+          "total": 6
+        }
+      }
+    },
+    {
+      "id": "GQ-ACL-004",
+      "category": null,
+      "answerable": true,
+      "expected_document_ids": [
+        "restricted-team"
+      ],
+      "retrieved_expected_document_ids": [
+        "restricted-team"
+      ],
+      "recall_at_k": 1.0,
+      "expected_sections": [],
+      "retrieved_sections": [
+        "restricted-team#Evidence"
+      ],
+      "retrieved_expected_sections": [],
+      "section_recall_at_k": null,
+      "citation_correct": [
+        true
+      ],
+      "forbidden_document_ids": [
+        "restricted-blocked"
+      ],
+      "forbidden_documents_disclosed": [],
+      "leakage_surfaces": [],
+      "abstention_correct": true,
+      "response": {
+        "request_id": "26f60208-c1cb-4291-805e-5a90fb9d193a",
+        "query_id": "eae84f95-296a-4515-b0e9-a27d5c35dd3b",
+        "status": "evidence_returned",
+        "strategy_used": "vector",
+        "response_mode": "evidence_only",
+        "answer": null,
+        "abstained": false,
+        "abstention_reason": null,
+        "evidence": [
+          {
+            "citation_id": "cit_1",
+            "document_id": "restricted-team",
+            "document_version": 2,
+            "chunk_id": "f229924f-1dbd-402e-9a97-1a63c7e34d03",
+            "document_type": "runbook",
+            "title": "Restricted Team Runbook",
+            "source_uri": "obsidian://acl-eval/restricted-team.md",
+            "excerpt": "Only the incident-response team may retrieve this synthetic evidence.",
+            "scores": {
+              "vector": 0.6339165525834355,
+              "full_text": null,
+              "rrf": null
+            },
+            "relationship_path": []
+          }
+        ],
+        "configuration": {
+          "retrieval_config_id": "acl-eval-nomic-embed-text-v1",
+          "embedding_model": "nomic-embed-text",
+          "embedding_model_revision": null,
+          "embedding_dimensions": 768,
+          "generator_model": null
+        },
+        "latency_ms": {
+          "retrieval": 138,
+          "generation": null,
+          "total": 138
+        }
+      }
+    },
+    {
+      "id": "GQ-ACL-005",
+      "category": null,
+      "answerable": false,
+      "expected_document_ids": [],
+      "retrieved_expected_document_ids": [],
+      "recall_at_k": null,
+      "expected_sections": [],
+      "retrieved_sections": [],
+      "retrieved_expected_sections": [],
+      "section_recall_at_k": null,
+      "citation_correct": [],
+      "forbidden_document_ids": [
+        "restricted-blocked",
+        "restricted-team"
+      ],
+      "forbidden_documents_disclosed": [],
+      "leakage_surfaces": [],
+      "abstention_correct": true,
+      "response": {
+        "request_id": "a649844a-bdd6-4d99-bd90-7dcf113bb869",
+        "query_id": "8872eac6-366e-47ba-838d-cc95c15c1aad",
+        "status": "abstained",
+        "strategy_used": "vector",
+        "response_mode": "evidence_only",
+        "answer": null,
+        "abstained": true,
+        "abstention_reason": "no_eligible_evidence",
+        "evidence": [],
+        "configuration": {
+          "retrieval_config_id": "acl-eval-nomic-embed-text-v1",
+          "embedding_model": "nomic-embed-text",
+          "embedding_model_revision": null,
+          "embedding_dimensions": 768,
+          "generator_model": null
+        },
+        "latency_ms": {
+          "retrieval": 7,
+          "generation": null,
+          "total": 7
+        }
+      }
+    }
+  ],
+  "metrics": {
+    "case_count": 5,
+    "recall_at_5_document_level": 1.0,
+    "section_recall_at_5": null,
+    "answerable_cases_with_any_expected_evidence": 1.0,
+    "citation_accuracy_document_level": 1.0,
+    "abstention_accuracy": 0.8,
+    "acl_leakage_cases": [],
+    "failed_cases": [
+      "GQ-ACL-002"
+    ]
+  }
+}
