@@ -230,12 +230,16 @@ async def test_missing_capability_returns_403_and_records_audit(
             _configure_endpoint(session, principal=outsider)
 
             response = await _post_reindex(
-                payload={"targets": ["chunks"], "reason": "manual"},
+                payload={
+                    "scope": {"type": "organization"},
+                    "targets": ["chunks"],
+                    "reason": "manual",
+                },
                 idempotency_key=f"k-{uuid4()}",
             )
 
             assert response.status_code == 403
-            assert response.json()["detail"] == "reindex_forbidden"
+            assert response.json()["error"]["code"] == "reindex_forbidden"
 
             audit = await session.scalar(
                 select(AuditEvent).where(
@@ -267,12 +271,16 @@ async def test_idempotency_key_required(migration_database_engine):
             _configure_endpoint(session, principal=principals["admin"])
 
             response = await _post_reindex(
-                payload={"targets": ["chunks"], "reason": "manual"},
+                payload={
+                    "scope": {"type": "organization"},
+                    "targets": ["chunks"],
+                    "reason": "manual",
+                },
                 idempotency_key=None,
             )
 
             assert response.status_code == 422
-            assert response.json()["detail"] == "idempotency_key_required"
+            assert response.json()["error"]["code"] == "idempotency_key_required"
         finally:
             app.dependency_overrides.clear()
             await session.close()
@@ -294,28 +302,46 @@ async def test_create_and_replay_and_conflict(migration_database_engine):
             key = f"replay-{uuid4()}"
 
             first = await _post_reindex(
-                payload={"targets": ["chunks"], "document_ids": ["fraud-service"], "reason": "manual"},
+                payload={
+                    "scope": {"type": "documents", "document_ids": ["fraud-service"]},
+                    "targets": ["chunks"],
+                    "reason": "manual",
+                },
                 idempotency_key=key,
             )
             assert first.status_code == 202
-            assert first.json()["replayed"] is False
-            assert first.json()["requested_document_count"] == 1
-            job_id = first.json()["reindex_job_id"]
+            first_body = first.json()
+            assert first_body["request_id"] == first.headers["X-Request-Id"]
+            assert first_body["status"] == "queued"
+            assert first_body["scope_type"] == "documents"
+            assert first_body["idempotency_replayed"] is False
+            assert first_body["requested_document_count"] == 1
+            job_id = first_body["job_id"]
 
             second = await _post_reindex(
-                payload={"targets": ["chunks"], "document_ids": ["fraud-service"], "reason": "manual"},
+                payload={
+                    "scope": {"type": "documents", "document_ids": ["fraud-service"]},
+                    "targets": ["chunks"],
+                    "reason": "manual",
+                },
                 idempotency_key=key,
             )
             assert second.status_code == 202
-            assert second.json()["reindex_job_id"] == job_id
-            assert second.json()["replayed"] is True
+            assert second.json()["job_id"] == job_id
+            assert second.json()["idempotency_replayed"] is True
+            assert second.json()["request_id"] == second.headers["X-Request-Id"]
+            assert second.json()["request_id"] != first_body["request_id"]
 
             conflict = await _post_reindex(
-                payload={"targets": ["chunks"], "document_ids": ["fraud-service"], "reason": "changed"},
+                payload={
+                    "scope": {"type": "documents", "document_ids": ["fraud-service"]},
+                    "targets": ["chunks"],
+                    "reason": "changed",
+                },
                 idempotency_key=key,
             )
             assert conflict.status_code == 409
-            assert conflict.json()["detail"] == "idempotency_conflict"
+            assert conflict.json()["error"]["code"] == "idempotency_conflict"
         finally:
             app.dependency_overrides.clear()
             await session.close()
@@ -346,15 +372,15 @@ async def test_restricted_document_returns_404(migration_database_engine):
 
             response = await _post_reindex(
                 payload={
+                    "scope": {"type": "documents", "document_ids": ["restricted-allowed"]},
                     "targets": ["chunks"],
-                    "document_ids": ["restricted-allowed"],
                     "reason": "manual",
                 },
                 idempotency_key=f"restricted-{uuid4()}",
             )
 
             assert response.status_code == 404
-            assert response.json()["detail"] == "document_not_found"
+            assert response.json()["error"]["code"] == "document_not_found"
         finally:
             app.dependency_overrides.clear()
             await session.close()
@@ -378,20 +404,24 @@ async def test_get_job_filters_items_by_acl_and_enforces_index_read(
 
             created = await _post_reindex(
                 payload={
+                    "scope": {
+                        "type": "documents",
+                        "document_ids": ["fraud-service", "restricted-allowed"],
+                    },
                     "targets": ["chunks"],
-                    "document_ids": ["fraud-service", "restricted-allowed"],
                     "reason": "manual",
                 },
                 idempotency_key=f"acl-{uuid4()}",
             )
             assert created.status_code == 202
             assert created.json()["requested_document_count"] == 2
-            job_id = created.json()["reindex_job_id"]
+            job_id = created.json()["job_id"]
 
             # Reader has index:read and org-scoped access only -> restricted item and count must be filtered.
             _configure_endpoint(session, principal=principals["reader"])
             reader_view = await _get_reindex(job_id)
             assert reader_view.status_code == 200
+            assert reader_view.json()["request_id"] == reader_view.headers["X-Request-Id"]
             assert reader_view.json()["requested_document_count"] == 1
             visible_pks = {item["document_pk"] for item in reader_view.json()["items"]}
             assert visible_pks == {str(org_ingested.document_pk)}
@@ -401,7 +431,7 @@ async def test_get_job_filters_items_by_acl_and_enforces_index_read(
             _configure_endpoint(session, principal=principals["outsider"])
             outsider_view = await _get_reindex(job_id)
             assert outsider_view.status_code == 404
-            assert outsider_view.json()["detail"] == "reindex_job_not_found"
+            assert outsider_view.json()["error"]["code"] == "reindex_job_not_found"
         finally:
             app.dependency_overrides.clear()
             await session.close()
@@ -429,12 +459,16 @@ async def test_unsupported_and_multi_targets_return_422(
             _configure_endpoint(session, principal=principals["admin"])
 
             response = await _post_reindex(
-                payload={"targets": targets, "reason": "manual"},
+                payload={
+                    "scope": {"type": "organization"},
+                    "targets": targets,
+                    "reason": "manual",
+                },
                 idempotency_key=f"target-{uuid4()}",
             )
 
             assert response.status_code == 422
-            assert response.json()["detail"] == "invalid_target"
+            assert response.json()["error"]["code"] == "invalid_target"
         finally:
             app.dependency_overrides.clear()
             await session.close()
@@ -458,15 +492,18 @@ async def test_replay_filters_count_after_acl_revocation(
             _configure_endpoint(session, principal=admin)
             key = f"revoke-replay-{uuid4()}"
             payload = {
+                "scope": {
+                    "type": "documents",
+                    "document_ids": ["fraud-service", "restricted-allowed"],
+                },
                 "targets": ["chunks"],
-                "document_ids": ["fraud-service", "restricted-allowed"],
                 "reason": "manual",
             }
 
             first = await _post_reindex(payload=payload, idempotency_key=key)
             assert first.status_code == 202
             assert first.json()["requested_document_count"] == 2
-            job_id = first.json()["reindex_job_id"]
+            job_id = first.json()["job_id"]
 
             # Revoke the restricted-document role membership before replaying.
             incident_role = await session.scalar(
@@ -487,9 +524,59 @@ async def test_replay_filters_count_after_acl_revocation(
 
             replayed = await _post_reindex(payload=payload, idempotency_key=key)
             assert replayed.status_code == 202
-            assert replayed.json()["reindex_job_id"] == job_id
-            assert replayed.json()["replayed"] is True
+            assert replayed.json()["job_id"] == job_id
+            assert replayed.json()["idempotency_replayed"] is True
             assert replayed.json()["requested_document_count"] == 1
+        finally:
+            app.dependency_overrides.clear()
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_reindex_scope_validation_rules(migration_database_engine):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(
+            bind=connection,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            principals, _, _ = await _seed_reindex_context(session)
+            _configure_endpoint(session, principal=principals["admin"])
+
+            empty_docs = await _post_reindex(
+                payload={
+                    "scope": {"type": "documents", "document_ids": []},
+                    "targets": ["chunks"],
+                    "reason": "manual",
+                },
+                idempotency_key=f"s1-{uuid4()}",
+            )
+            org_with_ids = await _post_reindex(
+                payload={
+                    "scope": {"type": "organization", "document_ids": ["fraud-service"]},
+                    "targets": ["chunks"],
+                    "reason": "manual",
+                },
+                idempotency_key=f"s2-{uuid4()}",
+            )
+            blank_reason = await _post_reindex(
+                payload={
+                    "scope": {"type": "organization"},
+                    "targets": ["chunks"],
+                    "reason": "   ",
+                },
+                idempotency_key=f"s3-{uuid4()}",
+            )
+
+            assert empty_docs.status_code == 422
+            assert empty_docs.json()["error"]["code"] == "validation_failed"
+            assert org_with_ids.status_code == 422
+            assert org_with_ids.json()["error"]["code"] == "validation_failed"
+            assert blank_reason.status_code == 422
+            assert blank_reason.json()["error"]["code"] == "validation_failed"
         finally:
             app.dependency_overrides.clear()
             await session.close()

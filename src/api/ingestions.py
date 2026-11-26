@@ -6,11 +6,12 @@ from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.errors import resolve_request_id
 from src.api.queries import AuthenticatedPrincipal, get_authenticated_principal
 from src.authorization.acl import resolve_readable_document_pks
 from src.authorization.capabilities import principal_has_capability
@@ -86,12 +87,13 @@ async def _record_ingestion_audit(
 @router.post("/ingestions", status_code=status.HTTP_202_ACCEPTED)
 async def create_ingestion_job(
     request: IngestionRequest,
+    http_request: Request,
     session: AsyncSession = Depends(get_db),
     principal: AuthenticatedPrincipal = Depends(get_authenticated_principal),
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, object]:
     """Accept and queue a batch of Markdown documents for worker processing."""
-    request_id = str(uuid4())
+    request_id = resolve_request_id(http_request)
 
     # Capability gate precedes idempotency lookup and any persistence.
     if not await principal_has_capability(
@@ -138,7 +140,7 @@ async def create_ingestion_job(
         if existing.request_payload_hash != payload_hash:
             raise HTTPException(status.HTTP_409_CONFLICT, "idempotency_conflict")
         return {
-            "request_id": existing.request_id,
+            "request_id": request_id,
             "job_id": str(existing.id),
             "status": existing.status,
             "submitted_document_count": existing.submitted_document_count,
@@ -202,6 +204,7 @@ async def create_ingestion_job(
 @router.get("/ingestions/{job_id}")
 async def get_ingestion_job(
     job_id: UUID,
+    http_request: Request,
     session: AsyncSession = Depends(get_db),
     principal: AuthenticatedPrincipal = Depends(get_authenticated_principal),
 ) -> dict[str, object]:
@@ -282,7 +285,7 @@ async def get_ingestion_job(
         visible_status = "completed"
 
     return {
-        "request_id": job.request_id,
+        "request_id": resolve_request_id(http_request),
         "job_id": str(job.id),
         "status": visible_status,
         "submitted_at": job.submitted_at.isoformat() if job.submitted_at else None,

@@ -253,7 +253,7 @@ async def test_missing_capability_returns_403_and_safe_audit(
             )
 
             assert response.status_code == 403
-            assert response.json()["detail"] == "ingestion_forbidden"
+            assert response.json()["error"]["code"] == "ingestion_forbidden"
 
             audit = await session.scalar(
                 select(AuditEvent).where(
@@ -265,6 +265,8 @@ async def test_missing_capability_returns_403_and_safe_audit(
             assert audit is not None
             assert audit.outcome == "denied"
             assert audit.reason_code == "ingestion_forbidden"
+            assert audit.request_id == response.json()["request_id"]
+            assert audit.request_id == response.headers["X-Request-Id"]
             assert audit.details == {"required_capability": "document:ingest"}
             assert (
                 await session.scalar(
@@ -306,7 +308,7 @@ async def test_idempotency_key_required(migration_database_engine):
             )
 
             assert response.status_code == 422
-            assert response.json()["detail"] == "idempotency_key_required"
+            assert response.json()["error"]["code"] == "idempotency_key_required"
         finally:
             app.dependency_overrides.clear()
             await session.close()
@@ -342,6 +344,7 @@ async def test_post_queues_202_with_submitted_markdown_and_replays_cleanly(
             first = await _post_ingestion(payload=payload, idempotency_key=key)
             assert first.status_code == 202
             body = first.json()
+            assert body["request_id"] == first.headers["X-Request-Id"]
             assert body["status"] == "queued"
             assert body["submitted_document_count"] == 1
             assert body["idempotency_replayed"] is False
@@ -381,6 +384,8 @@ async def test_post_queues_202_with_submitted_markdown_and_replays_cleanly(
             assert replayed.status_code == 202
             assert replayed.json()["job_id"] == str(job_id)
             assert replayed.json()["idempotency_replayed"] is True
+            assert replayed.json()["request_id"] == replayed.headers["X-Request-Id"]
+            assert replayed.json()["request_id"] != body["request_id"]
             assert (
                 await session.scalar(
                     select(func.count())
@@ -405,7 +410,7 @@ async def test_post_queues_202_with_submitted_markdown_and_replays_cleanly(
                 idempotency_key=key,
             )
             assert conflict.status_code == 409
-            assert conflict.json()["detail"] == "idempotency_conflict"
+            assert conflict.json()["error"]["code"] == "idempotency_conflict"
         finally:
             app.dependency_overrides.clear()
             await session.close()
@@ -469,6 +474,8 @@ async def test_get_ingestion_enforces_org_scope_capability_and_acl_after_worker(
                 assert reader_resp.status_code == 200
                 assert sentinel not in reader_resp.text
                 reader_body = reader_resp.json()
+                assert reader_body["request_id"] == reader_resp.headers["X-Request-Id"]
+                assert reader_body["request_id"] != created.json()["request_id"]
                 assert reader_body["status"] == "completed_with_errors"
                 assert reader_body["summary"] == {
                     "submitted": 2,
@@ -490,13 +497,13 @@ async def test_get_ingestion_enforces_org_scope_capability_and_acl_after_worker(
                 _configure_endpoint(read_session, principal=outsider_principal)
                 outsider_resp = await _get_ingestion(job_id)
                 assert outsider_resp.status_code == 404
-                assert outsider_resp.json()["detail"] == "ingestion_job_not_found"
+                assert outsider_resp.json()["error"]["code"] == "ingestion_job_not_found"
 
                 # Cross-org user with ingestion:read gets 404.
                 _configure_endpoint(read_session, principal=other_org_principal)
                 cross_org_resp = await _get_ingestion(job_id)
                 assert cross_org_resp.status_code == 404
-                assert cross_org_resp.json()["detail"] == "ingestion_job_not_found"
+                assert cross_org_resp.json()["error"]["code"] == "ingestion_job_not_found"
         finally:
             app.dependency_overrides.clear()
             await session.close()

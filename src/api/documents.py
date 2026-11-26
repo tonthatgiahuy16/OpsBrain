@@ -1,12 +1,12 @@
 """Read-only document state endpoint with capability and ACL enforcement."""
 
 from datetime import datetime, timezone
-from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.errors import resolve_request_id
 from src.api.queries import AuthenticatedPrincipal, get_authenticated_principal
 from src.authorization.acl import readable_document_clause
 from src.authorization.capabilities import principal_has_capability
@@ -84,6 +84,7 @@ async def _index_status(
 @router.get("/documents/{document_id}")
 async def get_document_state(
     document_id: str,
+    http_request: Request,
     principal: AuthenticatedPrincipal = Depends(get_authenticated_principal),
     session: AsyncSession = Depends(get_db),
 ):
@@ -153,7 +154,7 @@ async def get_document_state(
         retrieval_eligible=retrieval_eligible,
     )
     return {
-        "request_id": str(uuid4()),
+        "request_id": resolve_request_id(http_request),
         "document": {
             "document_id": document.document_id,
             "document_type": document.document_type,

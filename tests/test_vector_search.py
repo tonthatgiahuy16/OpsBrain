@@ -132,7 +132,7 @@ async def test_vector_search_ranks_only_acl_authorized_active_document_chunks(
             ) == []
 
             seeded["version"].effective_until = (
-                datetime.now(timezone.utc) - timedelta(seconds=1)
+                datetime.now(timezone.utc) - timedelta(minutes=5)
             )
             await session.flush()
             assert await vector_top_k(
@@ -426,7 +426,7 @@ async def test_active_embedding_profiles_lists_every_distinct_profile(
                 ("model-long", "revision-2", 768)
             ]
             long["version"].effective_until = (
-                datetime.now(timezone.utc) - timedelta(seconds=1)
+                datetime.now(timezone.utc) - timedelta(minutes=5)
             )
             await session.flush()
             assert await active_embedding_profiles(
