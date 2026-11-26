@@ -168,7 +168,7 @@ async def test_capability_denial_is_audited_and_durable(
 
             response = await _post({"question": "forbidden question text"})
             assert response.status_code == 403
-            assert response.json()["detail"] == "query_forbidden"
+            assert response.json()["error"]["code"] == "query_forbidden"
 
             # The denial commit happens before the exception aborts the
             # response, so the event survives the failed request.
@@ -183,6 +183,8 @@ async def test_capability_denial_is_audited_and_durable(
             assert event.actor_principal_id == viewer.id
             assert event.details == {"required_capability": "query:execute"}
             assert event.request_id
+            assert event.request_id == response.json()["request_id"]
+            assert event.request_id == response.headers["X-Request-Id"]
 
             serialized = json.dumps(event.details)
             assert "forbidden question text" not in serialized

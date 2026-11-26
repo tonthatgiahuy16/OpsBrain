@@ -1,22 +1,18 @@
-"""Minimal HTTP boundary for reindex jobs.
-
-The worker is lease-fenced and only claims work that is already queued here.
-This module is intentionally thin: it validates the principal, enforces
-``index:rebuild``, persists a queued job plus one item per requested current
-document version, and records an audit event. It never touches source content.
-"""
+"""HTTP boundary for reindex jobs aligned with minimal API contract §13."""
 
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.errors import resolve_request_id
+from src.api.queries import AuthenticatedPrincipal, get_authenticated_principal
 from src.authorization.acl import resolve_readable_document_pks
 from src.authorization.capabilities import principal_has_capability
 from src.database import get_db
@@ -25,28 +21,41 @@ from src.models.storage import (
     DerivedConfiguration,
     Document,
     DocumentVersion,
-    Organization,
-    Principal,
     ReindexJob,
     ReindexJobItem,
 )
-from src.api.queries import get_authenticated_principal
 
 router = APIRouter(prefix="/api/v1", tags=["ReindexJobs"])
 
 
+class ReindexScope(BaseModel):
+    type: Literal["documents", "organization"]
+    document_ids: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _validate_scope(self) -> "ReindexScope":
+        if self.type == "documents":
+            if not self.document_ids:
+                raise ValueError("document_ids must be non-empty for documents scope")
+            if any(not doc_id.strip() for doc_id in self.document_ids):
+                raise ValueError("document_ids must not contain blank values")
+        elif self.document_ids is not None:
+            raise ValueError("document_ids must be omitted for organization scope")
+        return self
+
+
 class ReindexRequest(BaseModel):
-    targets: list[str] = Field(default_factory=lambda: ["chunks"])
-    document_ids: list[str] = Field(default_factory=list)
+    scope: ReindexScope
+    targets: list[str] = Field(min_length=1)
+    reason: str = Field(min_length=1)
     configuration_id: UUID | None = None
-    reason: str = "manual"
 
-
-class ReindexJobResponse(BaseModel):
-    reindex_job_id: str
-    status_url: str
-    requested_document_count: int
-    targets: list[str]
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("reason must not be blank")
+        return value
 
 
 def _sha256(value: bytes) -> str:
@@ -55,15 +64,15 @@ def _sha256(value: bytes) -> str:
 
 def _payload_hash(
     *,
+    scope: ReindexScope,
     targets: list[str],
-    document_ids: list[str],
     reason: str,
     configuration_id: UUID | None,
 ) -> str:
     payload = {
-        "scope_type": "documents",
+        "scope_type": scope.type,
+        "document_ids": sorted(scope.document_ids or []),
         "targets": sorted(targets),
-        "document_ids": sorted(document_ids),
         "reason": reason,
         "configuration_id": str(configuration_id) if configuration_id else None,
     }
@@ -100,7 +109,7 @@ async def _visible_job_items(
 async def _record_reindex_audit(
     session: AsyncSession,
     *,
-    principal: object,
+    principal: AuthenticatedPrincipal,
     request_id: str,
     event_type: str,
     outcome: str,
@@ -126,13 +135,13 @@ async def _record_reindex_audit(
 @router.post("/reindex-jobs", status_code=status.HTTP_202_ACCEPTED)
 async def create_reindex_job(
     request: ReindexRequest,
+    http_request: Request,
     session: AsyncSession = Depends(get_db),
-    principal: object = Depends(get_authenticated_principal),
+    principal: AuthenticatedPrincipal = Depends(get_authenticated_principal),
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, object]:
-    request_id = str(uuid4())
+    request_id = resolve_request_id(http_request)
 
-    # Capability gate.
     if not await principal_has_capability(
         session,
         organization_id=principal.organization_id,
@@ -151,27 +160,23 @@ async def create_reindex_job(
         await session.commit()
         raise HTTPException(status.HTTP_403_FORBIDDEN, "reindex_forbidden")
 
-    if not request.targets:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "targets_required")
     if request.targets not in (["chunks"], ["embeddings"]):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "invalid_target")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_target")
 
-    # Idempotency key handling: require a client key for replay semantics.
     if not idempotency_key or not idempotency_key.strip():
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, "idempotency_key_required"
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "idempotency_key_required"
         )
     key_hash = _sha256(
         f"{principal.organization_id}:{principal.id}:{idempotency_key}".encode("utf-8")
     )
     payload_hash = _payload_hash(
+        scope=request.scope,
         targets=request.targets,
-        document_ids=request.document_ids,
         reason=request.reason,
         configuration_id=request.configuration_id,
     )
 
-    # Replay handling.
     existing = await session.scalar(
         select(ReindexJob).where(
             ReindexJob.organization_id == principal.organization_id,
@@ -191,14 +196,16 @@ async def create_reindex_job(
             job_id=existing.id,
         )
         return {
-            "reindex_job_id": str(existing.id),
-            "status_url": f"/api/v1/reindex-jobs/{existing.id}",
+            "request_id": request_id,
+            "job_id": str(existing.id),
+            "status": existing.status,
+            "scope_type": existing.scope_type,
             "requested_document_count": len(visible_items),
             "targets": existing.targets,
-            "replayed": True,
+            "idempotency_replayed": True,
+            "status_url": f"/api/v1/reindex-jobs/{existing.id}",
         }
 
-    # Resolve configuration.
     if request.configuration_id is not None:
         configuration = await session.scalar(
             select(DerivedConfiguration).where(
@@ -217,7 +224,6 @@ async def create_reindex_job(
     if configuration is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "configuration_not_found")
 
-    # Resolve readable document PKs (active only).
     allowed_pks = await resolve_readable_document_pks(
         session,
         organization_id=principal.organization_id,
@@ -225,18 +231,19 @@ async def create_reindex_job(
     )
 
     document_pk_by_id: dict[str, UUID] = {}
-    if request.document_ids:
+    if request.scope.type == "documents":
+        requested_ids = request.scope.document_ids or []
         rows = await session.execute(
             select(Document).where(
                 Document.organization_id == principal.organization_id,
-                Document.document_id.in_(request.document_ids),
+                Document.document_id.in_(requested_ids),
                 Document.record_state == "active",
             )
         )
         for document in rows.scalars().all():
             if document.id in allowed_pks:
                 document_pk_by_id[document.document_id] = document.id
-        if len(document_pk_by_id) != len(set(request.document_ids)):
+        if len(document_pk_by_id) != len(set(requested_ids)):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "document_not_found")
     else:
         rows = await session.execute(
@@ -251,7 +258,7 @@ async def create_reindex_job(
 
     if not document_pk_by_id:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, "no_documents"
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "no_documents"
         )
 
     job = ReindexJob(
@@ -260,7 +267,7 @@ async def create_reindex_job(
         idempotency_key_hash=key_hash,
         request_payload_hash=payload_hash,
         submitted_by_principal_id=principal.id,
-        scope_type="documents",
+        scope_type=request.scope.type,
         targets=request.targets,
         reason=request.reason,
         configuration_id=configuration.id,
@@ -270,7 +277,7 @@ async def create_reindex_job(
     session.add(job)
     await session.flush()
 
-    for document_id, document_pk in document_pk_by_id.items():
+    for document_pk in document_pk_by_id.values():
         document = await session.get(Document, document_pk)
         if document is None or document.current_version_id is None:
             raise HTTPException(
@@ -307,6 +314,7 @@ async def create_reindex_job(
             request_id=request_id,
             reindex_job_id=job.id,
             details={
+                "scope_type": request.scope.type,
                 "targets": request.targets,
                 "document_count": len(document_pk_by_id),
                 "configuration_id": str(configuration.id),
@@ -317,19 +325,23 @@ async def create_reindex_job(
     await session.commit()
 
     return {
-        "reindex_job_id": str(job.id),
-        "status_url": f"/api/v1/reindex-jobs/{job.id}",
+        "request_id": request_id,
+        "job_id": str(job.id),
+        "status": job.status,
+        "scope_type": job.scope_type,
         "requested_document_count": len(document_pk_by_id),
         "targets": request.targets,
-        "replayed": False,
+        "idempotency_replayed": False,
+        "status_url": f"/api/v1/reindex-jobs/{job.id}",
     }
 
 
 @router.get("/reindex-jobs/{job_id}")
 async def get_reindex_job(
     job_id: UUID,
+    http_request: Request,
     session: AsyncSession = Depends(get_db),
-    principal: object = Depends(get_authenticated_principal),
+    principal: AuthenticatedPrincipal = Depends(get_authenticated_principal),
 ) -> dict[str, object]:
     job = await session.scalar(
         select(ReindexJob).where(
@@ -357,8 +369,10 @@ async def get_reindex_job(
         job_id=job.id,
     )
     return {
-        "reindex_job_id": str(job.id),
+        "request_id": resolve_request_id(http_request),
+        "job_id": str(job.id),
         "status": job.status,
+        "scope_type": job.scope_type,
         "targets": job.targets,
         "requested_document_count": len(visible_items),
         "submitted_by_principal_id": str(job.submitted_by_principal_id),

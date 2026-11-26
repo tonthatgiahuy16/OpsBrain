@@ -83,7 +83,7 @@ async def test_review_endpoint_returns_approval_forbidden_for_visible_document_w
             )
 
             assert response.status_code == 403
-            assert response.json()["detail"] == "approval_forbidden"
+            assert response.json()["error"]["code"] == "approval_forbidden"
         finally:
             app.dependency_overrides.clear()
             await session.close()
@@ -111,7 +111,7 @@ async def test_review_endpoint_hides_unknown_document_as_not_found(migration_dat
             )
 
             assert response.status_code == 404
-            assert response.json()["detail"] == "document_not_found"
+            assert response.json()["error"]["code"] == "document_not_found"
         finally:
             app.dependency_overrides.clear()
             await session.close()
@@ -157,7 +157,7 @@ async def test_review_endpoint_hides_existing_restricted_document_before_version
             )
 
             assert response.status_code == 404
-            assert response.json()["detail"] == "document_not_found"
+            assert response.json()["error"]["code"] == "document_not_found"
             denied = await session.scalar(
                 select(AuditEvent).where(
                     AuditEvent.organization_id == organization_id,
@@ -282,7 +282,7 @@ async def test_review_endpoint_rejects_changed_payload_for_existing_idempotency_
 
             assert first.status_code == 200
             assert conflict.status_code == 409
-            assert conflict.json()["detail"] == "idempotency_conflict"
+            assert conflict.json()["error"]["code"] == "idempotency_conflict"
         finally:
             app.dependency_overrides.clear()
             await session.close()

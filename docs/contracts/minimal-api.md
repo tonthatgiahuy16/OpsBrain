@@ -721,7 +721,7 @@ Request body cho toàn organization:
 - `scope.type` nhận `documents` hoặc `organization`.
 - `document_ids` bắt buộc và không được rỗng khi scope là `documents`.
 - `document_ids` không được xuất hiện khi scope là `organization`.
-- `targets` là danh sách không rỗng gồm `chunks`, `embeddings`, `full_text` hoặc `relationships`.
+- `targets` là danh sách không rỗng gồm `chunks`, `embeddings`, `full_text` hoặc `relationships`. Ở baseline Milestone 5 (vector-only), backend chỉ hỗ trợ singleton `["chunks"]` hoặc `["embeddings"]`; các target `full_text`, `relationships` hoặc danh sách nhiều target thuộc milestone sau và hiện trả `422 invalid_target`.
 - `reason` là chuỗi bắt buộc và không được rỗng.
 - Reindex sử dụng source document và current version trong PostgreSQL.
 - Request không được yêu cầu backend đọc một filesystem path tùy ý.

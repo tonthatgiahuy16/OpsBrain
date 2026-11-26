@@ -94,9 +94,9 @@ async def test_document_state_hides_missing_capability_and_unknown_document(
             unknown_document = await _get_document("not-a-document")
 
             assert missing_capability.status_code == 404
-            assert missing_capability.json()["detail"] == "document_not_found"
+            assert missing_capability.json()["error"]["code"] == "document_not_found"
             assert unknown_document.status_code == 404
-            assert unknown_document.json()["detail"] == "document_not_found"
+            assert unknown_document.json()["error"]["code"] == "document_not_found"
         finally:
             app.dependency_overrides.clear()
             await session.close()

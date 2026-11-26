@@ -7,10 +7,12 @@ from time import perf_counter
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.api.errors import resolve_request_id
 
 from src.authorization.acl import (
     readable_document_clause,
@@ -41,10 +43,57 @@ class AuthenticatedPrincipal:
     organization_id: UUID
 
 
+class QueryContext(BaseModel):
+    active_document_id: str | None = Field(default=None, min_length=1)
+
+
+class RetrievalOptions(BaseModel):
+    strategy: Literal["auto", "vector", "hybrid", "hybrid_graph"] = "auto"
+    top_k: int = Field(default=5, ge=1, le=20)
+
+
 class RetrievalRequest(BaseModel):
     question: str = Field(min_length=1, max_length=8_000)
     response_mode: Literal["evidence_only", "answer"] = "evidence_only"
+    strategy: Literal["auto", "vector", "hybrid", "hybrid_graph"] | None = None
     top_k: int = Field(default=5, ge=1, le=20)
+    context: QueryContext | None = None
+    retrieval: RetrievalOptions | None = None
+
+    @model_validator(mode="after")
+    def _reject_conflicting_retrieval_options(self) -> "RetrievalRequest":
+        if self.retrieval is None:
+            return self
+        if (
+            "strategy" in self.model_fields_set
+            and "strategy" in self.retrieval.model_fields_set
+            and self.strategy is not None
+            and self.strategy != self.retrieval.strategy
+        ):
+            raise ValueError("strategy conflicts with retrieval.strategy")
+        if (
+            "top_k" in self.model_fields_set
+            and "top_k" in self.retrieval.model_fields_set
+            and self.top_k != self.retrieval.top_k
+        ):
+            raise ValueError("top_k conflicts with retrieval.top_k")
+        return self
+
+    @property
+    def effective_strategy(
+        self,
+    ) -> Literal["auto", "vector", "hybrid", "hybrid_graph"]:
+        if self.strategy is not None:
+            return self.strategy
+        if self.retrieval is not None:
+            return self.retrieval.strategy
+        return "auto"
+
+    @property
+    def effective_top_k(self) -> int:
+        if self.retrieval is not None:
+            return self.retrieval.top_k
+        return self.top_k
 
 
 def _token_map() -> dict[str, str]:
@@ -188,6 +237,7 @@ async def _record_query_audit(
 @router.post("/queries")
 async def execute_query(
     request: RetrievalRequest,
+    http_request: Request,
     session: AsyncSession = Depends(get_db),
     principal: AuthenticatedPrincipal = Depends(get_authenticated_principal),
 ) -> dict[str, object]:
@@ -201,7 +251,7 @@ async def execute_query(
     Every terminal outcome appends an audit event (contract §12.6 step 10):
     ``query.denied``, ``query.abstained`` or ``query.executed``.
     """
-    request_id = str(uuid4())
+    request_id = resolve_request_id(http_request)
     if not await principal_has_capability(
         session,
         organization_id=principal.organization_id,
@@ -218,6 +268,11 @@ async def execute_query(
             details={"required_capability": QUERY_CAPABILITY},
         )
         raise HTTPException(status.HTTP_403_FORBIDDEN, "query_forbidden")
+    if request.effective_strategy in ("hybrid", "hybrid_graph"):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "unsupported_retrieval_strategy",
+        )
     if request.response_mode == "answer":
         raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "generation_not_implemented")
     started = perf_counter()
@@ -227,6 +282,20 @@ async def execute_query(
         organization_id=principal.organization_id,
         principal_id=principal.id,
     )
+    active_document_pk: UUID | None = None
+    if request.context is not None and request.context.active_document_id is not None:
+        context_doc = await session.scalar(
+            select(Document).where(
+                Document.organization_id == principal.organization_id,
+                Document.document_id == request.context.active_document_id,
+                Document.record_state == "active",
+            )
+        )
+        if context_doc is None or context_doc.id not in allowed_document_pks:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "context_document_not_found"
+            )
+        active_document_pk = context_doc.id
     profiles = await active_embedding_profiles(
         session,
         organization_id=principal.organization_id,
@@ -249,6 +318,11 @@ async def execute_query(
         query_embedding = (await client.embed_texts([request.question]))[0]
     except OllamaEmbeddingError:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "embedding_unavailable")
+    candidate_k = (
+        min(max(request.effective_top_k * 4, 20), 50)
+        if active_document_pk is not None
+        else request.effective_top_k
+    )
     hits = await vector_top_k(
         session,
         organization_id=principal.organization_id,
@@ -256,7 +330,7 @@ async def execute_query(
         query_embedding=query_embedding,
         embedding_model=configuration.embedding_model,
         embedding_model_revision=configuration.embedding_model_revision,
-        top_k=request.top_k,
+        top_k=candidate_k,
     )
     if not hits:
         return await _abstain(
@@ -287,6 +361,16 @@ async def execute_query(
             session, principal=principal, request_id=request_id,
             request=request, configuration=configuration, started=started,
         )
+    if active_document_pk is not None:
+        # Apply a bounded priority boost to the active document only after ACL
+        # and minimum-score gates, keeping reported vector scores unmutated.
+        hits = sorted(
+            hits,
+            key=lambda hit: hit.score
+            + (0.05 if hit.document_pk == active_document_pk else 0.0),
+            reverse=True,
+        )
+    hits = hits[: request.effective_top_k]
     evidence = []
     audit_evidence = []
     for hit in hits:
@@ -358,7 +442,7 @@ async def execute_query(
         details={
             "strategy": "vector",
             "response_mode": request.response_mode,
-            "top_k": request.top_k,
+            "top_k": request.effective_top_k,
             "retrieval_config_id": configuration.configuration_key,
             "embedding_model": configuration.embedding_model,
             "evidence_count": len(audit_evidence),
@@ -408,7 +492,7 @@ async def _abstain(
         details={
             "strategy": "vector",
             "response_mode": request.response_mode,
-            "top_k": request.top_k,
+            "top_k": request.effective_top_k,
             "retrieval_config_id": configuration.configuration_key,
             "embedding_model": configuration.embedding_model,
             "abstention_reason": reason,

@@ -2,11 +2,12 @@
 
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.errors import resolve_request_id
 from src.api.queries import AuthenticatedPrincipal, get_authenticated_principal
 from src.authorization.acl import resolve_readable_document_pks
 from src.authorization.capabilities import (
@@ -90,12 +91,13 @@ async def _selected_configuration_id(session: AsyncSession, *, organization_id):
 async def create_review_decision(
     document_id: str,
     request: ReviewDecisionRequest,
+    http_request: Request,
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
     session: AsyncSession = Depends(get_db),
     principal: AuthenticatedPrincipal = Depends(get_authenticated_principal),
 ) -> dict[str, object]:
     """Approve or reject a visible document using the authenticated principal."""
-    request_id = str(uuid4())
+    request_id = resolve_request_id(http_request)
     current = await _document_and_current_version(
         session,
         organization_id=principal.organization_id,
@@ -193,7 +195,7 @@ async def create_review_decision(
             "author cannot review own version": (status.HTTP_403_FORBIDDEN, "independent_review_required"),
         }
         http_status, code = error_map.get(
-            str(error), (status.HTTP_422_UNPROCESSABLE_ENTITY, "invalid_request"),
+            str(error), (status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_request"),
         )
         raise HTTPException(http_status, code)
 

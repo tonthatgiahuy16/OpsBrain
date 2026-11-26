@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from src import __version__
 from src.config import get_settings
 from src.database import check_database_readiness
+from src.api.errors import register_error_handlers
 from src.api.ingestions import router as ingestion_router
 from src.api.documents import router as documents_router
 from src.api.queries import router as query_router
@@ -43,6 +44,7 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+register_error_handlers(app)
 app.include_router(ingestion_router)
 app.include_router(documents_router)
 app.include_router(query_router)

@@ -115,7 +115,7 @@ async def test_query_requires_execute_capability_even_with_readable_documents(
 
             response = await _post()
             assert response.status_code == 403
-            assert response.json()["detail"] == "query_forbidden"
+            assert response.json()["error"]["code"] == "query_forbidden"
             assert "excerpt" not in str(response.json())
             assert str(blocked["document_pk"]) not in str(response.json())
             assert "restricted-allowed" not in str(response.json())
@@ -145,7 +145,7 @@ async def test_revoked_query_capability_is_enforced_without_caching(
             )
             denied = await _post()
             assert denied.status_code == 403
-            assert denied.json()["detail"] == "query_forbidden"
+            assert denied.json()["error"]["code"] == "query_forbidden"
         finally:
             app.dependency_overrides.clear()
             await session.close()
@@ -289,7 +289,7 @@ async def test_unconfigured_organization_returns_retrieval_unavailable(
 
             response = await _post()
             assert response.status_code == 503
-            assert response.json()["detail"] == "retrieval_unavailable"
+            assert response.json()["error"]["code"] == "retrieval_unavailable"
             assert "excerpt" not in str(response.json())
         finally:
             app.dependency_overrides.clear()
@@ -590,7 +590,7 @@ async def test_cross_organization_principal_cannot_query_or_read_other_org_docum
             )
             forbidden = await _post({"question": "evidence", "top_k": 1})
             assert forbidden.status_code == 403
-            assert forbidden.json()["detail"] == "query_forbidden"
+            assert forbidden.json()["error"]["code"] == "query_forbidden"
 
             await grant_capability(
                 session, organization_id=other_org_id,
