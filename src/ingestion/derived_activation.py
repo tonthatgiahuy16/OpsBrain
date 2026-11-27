@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.models.storage import (
     Chunk,
     ChunkEmbedding,
+    ChunkFullTextIndex,
     DerivedConfiguration,
     DerivedSet,
     Document,
@@ -14,6 +15,7 @@ from src.models.storage import (
     Organization,
 )
 from src.ingestion.eligibility import is_pre_acl_retrieval_eligible
+from src.ingestion.full_text_build import ALLOWED_FULL_TEXT_CONFIGURATIONS
 
 
 async def activate_derived_set(
@@ -103,15 +105,10 @@ async def activate_derived_set(
         if configuration is None or configuration.status != "active":
             raise ValueError("derived configuration is not active")
 
-        # Full-text and relationship output still have no storage/build path.
-        # Embeddings are allowed only when every chunk has one persisted row.
-        if any(
-            value is not None
-            for value in (
-                configuration.full_text_configuration,
-                configuration.relationship_extractor_version,
-            )
-        ):
+        # Relationship output still has no storage/build path.
+        # Embeddings and full-text indexes are required whenever enabled on the
+        # active configuration.
+        if configuration.relationship_extractor_version is not None:
             raise ValueError("required derived components are incomplete")
 
         chunk_count = await session.scalar(
@@ -134,6 +131,25 @@ async def activate_derived_set(
                 )
             )).all())
             if len(embeddings) != chunk_count:
+                raise ValueError("required derived components are incomplete")
+
+        if configuration.full_text_configuration is not None:
+            if (
+                configuration.full_text_configuration
+                not in ALLOWED_FULL_TEXT_CONFIGURATIONS
+            ):
+                raise ValueError("required derived components are incomplete")
+            full_text_count = await session.scalar(
+                select(func.count())
+                .select_from(ChunkFullTextIndex)
+                .where(
+                    ChunkFullTextIndex.organization_id == organization_id,
+                    ChunkFullTextIndex.derived_set_id == derived_set.id,
+                    ChunkFullTextIndex.full_text_configuration
+                    == configuration.full_text_configuration,
+                )
+            )
+            if full_text_count != chunk_count:
                 raise ValueError("required derived components are incomplete")
 
         if derived_set.is_active:

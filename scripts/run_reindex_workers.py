@@ -6,6 +6,7 @@ from src.database import WorkerAsyncSessionLocal
 from src.ingestion.reindex_worker import (
     process_next_chunk_reindex_item,
     process_next_embedding_reindex_item,
+    process_next_full_text_reindex_item,
 )
 
 
@@ -22,7 +23,8 @@ async def _drain(process) -> int:
 async def main() -> None:
     chunks = await _drain(process_next_chunk_reindex_item)
     embeddings = await _drain(process_next_embedding_reindex_item)
-    print(f"chunks={chunks} embeddings={embeddings}")
+    full_text = await _drain(process_next_full_text_reindex_item)
+    print(f"chunks={chunks} embeddings={embeddings} full_text={full_text}")
 
 
 if __name__ == "__main__":

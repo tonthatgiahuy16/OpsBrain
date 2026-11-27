@@ -526,6 +526,39 @@ Request body:
 - Nếu các derived set **retrieval-eligible** đang active có nhiều hơn một embedding profile, hoặc profile duy nhất của chúng khác profile từ active configuration, endpoint phải trả `503 retrieval_unavailable` thay vì trả kết quả thiếu document. Đánh giá eligibility phải dùng lifecycle, review state, temporal validity và organization status tại thời điểm query.
 - Strategy chưa được triển khai phải trả lỗi rõ ràng, không âm thầm đổi sang strategy khác.
 
+### 12.2.1 Milestone 6 hybrid retrieval rules
+
+- `strategy: vector` giữ nguyên baseline vector-only để so sánh; `strategy:
+  hybrid` chạy vector và PostgreSQL full-text trên cùng tập candidate đã qua
+  organization, lifecycle, review, temporal validity, active-derived-set và
+  ACL filtering. `strategy: auto` dùng `hybrid` sau khi M6 được triển khai.
+  `hybrid_graph` vẫn trả `422 unsupported_retrieval_strategy` cho đến M7.
+- Public API M6 không thêm `full_text` strategy độc lập. Full-text source tồn
+  tại để phục vụ hybrid và evaluation, không được âm thầm fallback từ hybrid
+  về vector-only khi full-text unavailable.
+- Full-text query dùng `websearch_to_tsquery('english', question)` và rank
+  bằng `ts_rank_cd(search_vector, query, 32)`. Configuration không lấy từ
+  request body hoặc string SQL động.
+- Mỗi source lấy `candidate_k = min(max(top_k * 4, 20), 50)` candidate đã
+  authorized. Candidate width là như nhau giữa vector và full-text; `top_k`
+  chỉ được áp dụng sau fusion. Vector candidate vẫn phải qua
+  `QUERY_MIN_VECTOR_SCORE`; full-text chỉ nhận row có match query.
+- Fusion dùng Reciprocal Rank Fusion với `rrf_k = 60`:
+  `rrf_score(chunk) = Σ 1 / (60 + rank_source(chunk))`, trong đó rank bắt đầu
+  từ 1 ở từng source. Không cộng trực tiếp vector score với `ts_rank_cd` vì
+  hai score không cùng thang đo.
+- Ordering sau fusion là `rrf` giảm dần, rồi `chunk_id` tăng dần. Context ưu
+  tiên active document chỉ được áp dụng sau ACL/fusion, không thay đổi hay
+  che giấu raw source scores, và phải có regression test riêng.
+- Một evidence hybrid trả `scores.vector`, `scores.full_text` và
+  `scores.rrf`; source không trả candidate cho chunk đó ghi `null`. Audit chỉ
+  ghi identifiers và scores của evidence cuối cùng đã được phép trả về, không
+  ghi question, excerpt, raw candidate count hay restricted candidate.
+- ACL được áp dụng trong SQL của từng retrieval source trước ranking. RRF chỉ
+  nhận authorized candidate; document trái quyền không được ảnh hưởng rank,
+  score, top-k, latency detail, metadata hoặc citation. Sau embedding call và
+  trước citation, endpoint phải re-authorize như vector baseline.
+
 ### 12.3 Evidence-only response
 
 ```json
@@ -721,7 +754,7 @@ Request body cho toàn organization:
 - `scope.type` nhận `documents` hoặc `organization`.
 - `document_ids` bắt buộc và không được rỗng khi scope là `documents`.
 - `document_ids` không được xuất hiện khi scope là `organization`.
-- `targets` là danh sách không rỗng gồm `chunks`, `embeddings`, `full_text` hoặc `relationships`. Ở baseline Milestone 5 (vector-only), backend chỉ hỗ trợ singleton `["chunks"]` hoặc `["embeddings"]`; các target `full_text`, `relationships` hoặc danh sách nhiều target thuộc milestone sau và hiện trả `422 invalid_target`.
+- `targets` là danh sách không rỗng gồm `chunks`, `embeddings`, `full_text` hoặc `relationships`. Ở baseline Milestone 6 hiện tại, backend hỗ trợ singleton `["chunks"]`, `["embeddings"]` hoặc `["full_text"]`; target `relationships` hoặc danh sách nhiều target thuộc milestone sau và hiện trả `422 invalid_target`.
 - `reason` là chuỗi bắt buộc và không được rỗng.
 - Reindex sử dụng source document và current version trong PostgreSQL.
 - Request không được yêu cầu backend đọc một filesystem path tùy ý.

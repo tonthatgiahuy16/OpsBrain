@@ -17,10 +17,15 @@ from src.ingestion.derived_activation import activate_derived_set
 from src.ingestion.derived_build import build_chunk_derived_set
 from src.ingestion.embedding_build import persist_chunk_embeddings
 from src.ingestion.eligibility import is_pre_acl_retrieval_eligible
+from src.ingestion.full_text_build import (
+    ALLOWED_FULL_TEXT_CONFIGURATIONS,
+    persist_chunk_full_text_indexes,
+)
 from src.ingestion.canonicalization import normalize_markdown_body
 from src.ingestion.ollama_embeddings import OllamaEmbeddingClient, OllamaEmbeddingError
 from src.models.storage import (
-    AuditEvent, Chunk, DerivedConfiguration, DerivedSet, Document, DocumentVersion,
+    AuditEvent, Chunk, ChunkEmbedding, ChunkFullTextIndex, DerivedConfiguration,
+    DerivedSet, Document, DocumentVersion,
     Organization, ReindexJob, ReindexJobItem, ReindexJobItemAttempt,
 )
 
@@ -193,6 +198,12 @@ async def claim_next_embedding_reindex_item(
     return await claim_next_chunk_reindex_item(session, now=now, target="embeddings")
 
 
+async def claim_next_full_text_reindex_item(
+    session: AsyncSession, *, now: datetime | None = None,
+) -> ClaimedChunkReindexItem | None:
+    return await claim_next_chunk_reindex_item(session, now=now, target="full_text")
+
+
 async def _lock_claim(
     session: AsyncSession, claim: ClaimedChunkReindexItem, now: datetime,
 ) -> tuple[ReindexJobItem, ReindexJob, ReindexJobItemAttempt]:
@@ -344,33 +355,44 @@ async def _finalize_build(
         await _succeed(session, item=item, job=job, attempt=attempt, outcome="skipped", code="document_not_eligible", derived_set=None, now=final_now)
         return item.id
     await build_savepoint.commit()
+    follow_up_targets: list[str] = []
     if configuration.embedding_model is not None:
-        follow_up = ReindexJob(
-            organization_id=claim.organization_id,
-            request_id=f"{job.request_id}:embeddings:{derived_set.id}",
-            idempotency_key_hash=sha256(
-                f"{job.id}:embeddings:{derived_set.id}".encode()
-            ).hexdigest(),
-            request_payload_hash=sha256(
-                f"{claim.document_pk}:{claim.source_document_version_id}:embeddings".encode()
-            ).hexdigest(),
-            submitted_by_principal_id=job.submitted_by_principal_id,
-            scope_type="documents", targets=["embeddings"],
-            reason="chunks_ready_for_embeddings",
-            configuration_id=claim.configuration_id,
-            requested_document_count=1, status="queued",
+        follow_up_targets.append("embeddings")
+    if configuration.full_text_configuration is not None:
+        follow_up_targets.append("full_text")
+    if follow_up_targets:
+        for target_name in follow_up_targets:
+            follow_up = ReindexJob(
+                organization_id=claim.organization_id,
+                request_id=f"{job.request_id}:{target_name}:{derived_set.id}",
+                idempotency_key_hash=sha256(
+                    f"{job.id}:{target_name}:{derived_set.id}".encode()
+                ).hexdigest(),
+                request_payload_hash=sha256(
+                    f"{claim.document_pk}:{claim.source_document_version_id}:{target_name}".encode()
+                ).hexdigest(),
+                submitted_by_principal_id=job.submitted_by_principal_id,
+                scope_type="documents",
+                targets=[target_name],
+                reason=f"chunks_ready_for_{target_name}",
+                configuration_id=claim.configuration_id,
+                requested_document_count=1,
+                status="queued",
+            )
+            session.add(follow_up)
+            await session.flush()
+            session.add(ReindexJobItem(
+                organization_id=claim.organization_id,
+                reindex_job_id=follow_up.id,
+                document_pk=claim.document_pk,
+                source_document_version_id=claim.source_document_version_id,
+                processing_status="queued",
+            ))
+        await _succeed(
+            session, item=item, job=job, attempt=attempt,
+            outcome="rebuilt", code=None, derived_set=derived_set,
+            now=final_now,
         )
-        session.add(follow_up)
-        await session.flush()
-        session.add(ReindexJobItem(
-            organization_id=claim.organization_id, reindex_job_id=follow_up.id,
-            document_pk=claim.document_pk,
-            source_document_version_id=claim.source_document_version_id,
-            processing_status="queued",
-        ))
-        await _succeed(session, item=item, job=job, attempt=attempt,
-                       outcome="rebuilt", code=None, derived_set=derived_set,
-                       now=final_now)
         return item.id
     await activate_derived_set(session, organization_id=claim.organization_id, derived_set_id=derived_set.id)
     await _succeed(session, item=item, job=job, attempt=attempt, outcome="rebuilt", code=None, derived_set=derived_set, now=final_now)
@@ -616,12 +638,314 @@ async def process_next_embedding_reindex_item(
             vectors_by_chunk_id=dict(zip(chunk_ids, vectors, strict=True)),
         )
         stage = "embedding_activate"
-        activated = await activate_derived_set(
-            session, organization_id=claim.organization_id, derived_set_id=derived_set_id,
-        )
+        if await _all_required_derived_components_present(
+            session,
+            organization_id=claim.organization_id,
+            derived_set_id=derived_set_id,
+            configuration=configuration,
+        ):
+            result_set = await activate_derived_set(
+                session,
+                organization_id=claim.organization_id,
+                derived_set_id=derived_set_id,
+            )
+        else:
+            result_set = derived_set
         await _succeed(
             session, item=item, job=job, attempt=attempt,
-            outcome="rebuilt", code=None, derived_set=activated, now=final_now,
+            outcome="rebuilt", code=None, derived_set=result_set, now=final_now,
+        )
+        await session.commit()
+        return item.id
+    except _FencedAttempt:
+        await session.rollback()
+        return claim.item_id
+    except Exception as error:
+        await session.rollback()
+        try:
+            retryable, code = _classify_reindex_error(error)
+            if code == "chunk_build_failed":
+                code = f"{stage}_failed"
+            item_id = await _record_failure(
+                session, claim, retryable=retryable, code=code, now=_now(),
+            )
+            await session.commit()
+            return item_id
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def _all_required_derived_components_present(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    derived_set_id: UUID,
+    configuration: DerivedConfiguration,
+) -> bool:
+    if configuration.relationship_extractor_version is not None:
+        return False
+    chunk_count = await session.scalar(
+        select(func.count())
+        .select_from(Chunk)
+        .where(
+            Chunk.organization_id == organization_id,
+            Chunk.derived_set_id == derived_set_id,
+        )
+    )
+    if not chunk_count:
+        return False
+    if configuration.embedding_model is not None:
+        embedding_count = await session.scalar(
+            select(func.count())
+            .select_from(ChunkEmbedding)
+            .where(
+                ChunkEmbedding.organization_id == organization_id,
+                ChunkEmbedding.derived_set_id == derived_set_id,
+            )
+        )
+        if embedding_count != chunk_count:
+            return False
+    if configuration.full_text_configuration is not None:
+        full_text_count = await session.scalar(
+            select(func.count())
+            .select_from(ChunkFullTextIndex)
+            .where(
+                ChunkFullTextIndex.organization_id == organization_id,
+                ChunkFullTextIndex.derived_set_id == derived_set_id,
+                ChunkFullTextIndex.full_text_configuration
+                == configuration.full_text_configuration,
+            )
+        )
+        if full_text_count != chunk_count:
+            return False
+    return True
+
+
+async def process_next_full_text_reindex_item(
+    session: AsyncSession,
+) -> UUID | None:
+    """Claim, build, persist and activate one full-text reindex item."""
+    claim = await claim_next_full_text_reindex_item(session)
+    if claim is None:
+        return None
+    stage = "full_text_prepare"
+    try:
+        now = _now()
+        item, job, attempt = await _lock_claim(session, claim, now)
+        organization = await session.scalar(
+            select(Organization).where(Organization.id == claim.organization_id)
+        )
+        document = await session.scalar(
+            select(Document)
+            .where(
+                Document.organization_id == claim.organization_id,
+                Document.id == claim.document_pk,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        version = await session.scalar(
+            select(DocumentVersion).where(
+                DocumentVersion.organization_id == claim.organization_id,
+                DocumentVersion.document_pk == claim.document_pk,
+                DocumentVersion.id == claim.source_document_version_id,
+            )
+        )
+        configuration = await session.scalar(
+            select(DerivedConfiguration).where(
+                DerivedConfiguration.organization_id == claim.organization_id,
+                DerivedConfiguration.id == claim.configuration_id,
+            )
+        )
+        if (
+            document is None
+            or document.current_version_id != claim.source_document_version_id
+        ):
+            await _succeed(
+                session, item=item, job=job, attempt=attempt,
+                outcome="skipped", code="source_version_changed",
+                derived_set=None, now=now,
+            )
+            await session.commit()
+            return item.id
+        if not is_pre_acl_retrieval_eligible(organization, document, version, now):
+            await _succeed(
+                session, item=item, job=job, attempt=attempt,
+                outcome="skipped", code="document_not_eligible",
+                derived_set=None, now=now,
+            )
+            await session.commit()
+            return item.id
+        if (
+            configuration is None
+            or configuration.status != "active"
+            or configuration.full_text_configuration
+            not in ALLOWED_FULL_TEXT_CONFIGURATIONS
+        ):
+            await _succeed(
+                session, item=item, job=job, attempt=attempt,
+                outcome="skipped", code="configuration_not_applicable",
+                derived_set=None, now=now,
+            )
+            await session.commit()
+            return item.id
+        ft_config = configuration.full_text_configuration
+        active_set = await session.scalar(
+            select(DerivedSet)
+            .where(
+                DerivedSet.organization_id == claim.organization_id,
+                DerivedSet.document_version_id == claim.source_document_version_id,
+                DerivedSet.configuration_id == claim.configuration_id,
+                DerivedSet.status == "ready",
+                DerivedSet.is_active.is_(True),
+            )
+            .with_for_update()
+        )
+        if active_set is not None:
+            await _succeed(
+                session, item=item, job=job, attempt=attempt,
+                outcome="skipped", code="already_current",
+                derived_set=None, now=now,
+            )
+            await session.commit()
+            return item.id
+        source_set = await session.scalar(
+            select(DerivedSet)
+            .where(
+                DerivedSet.organization_id == claim.organization_id,
+                DerivedSet.document_version_id == claim.source_document_version_id,
+                DerivedSet.configuration_id == claim.configuration_id,
+                DerivedSet.status == "ready",
+            )
+            .order_by(DerivedSet.build_number.desc())
+            .limit(1)
+        )
+        if source_set is None or not await session.scalar(
+            select(func.count())
+            .select_from(Chunk)
+            .where(
+                Chunk.organization_id == claim.organization_id,
+                Chunk.derived_set_id == source_set.id,
+            )
+        ):
+            await _succeed(
+                session, item=item, job=job, attempt=attempt,
+                outcome="skipped", code="full_text_source_not_available",
+                derived_set=None, now=now,
+            )
+            await session.commit()
+            return item.id
+
+        stage = "full_text_persist"
+        build_savepoint = await session.begin_nested()
+        await persist_chunk_full_text_indexes(
+            session,
+            organization_id=claim.organization_id,
+            derived_set_id=source_set.id,
+        )
+        final_now = _now()
+        item, job, attempt = await _lock_claim(session, claim, final_now)
+        organization = await session.scalar(
+            select(Organization).where(Organization.id == claim.organization_id)
+        )
+        document = await session.scalar(
+            select(Document)
+            .where(
+                Document.organization_id == claim.organization_id,
+                Document.id == claim.document_pk,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        version = await session.scalar(
+            select(DocumentVersion).where(
+                DocumentVersion.organization_id == claim.organization_id,
+                DocumentVersion.document_pk == claim.document_pk,
+                DocumentVersion.id == claim.source_document_version_id,
+            )
+        )
+        configuration = await session.scalar(
+            select(DerivedConfiguration).where(
+                DerivedConfiguration.organization_id == claim.organization_id,
+                DerivedConfiguration.id == claim.configuration_id,
+            )
+        )
+        if (
+            document is None
+            or document.current_version_id != claim.source_document_version_id
+        ):
+            await build_savepoint.rollback()
+            await _succeed(
+                session, item=item, job=job, attempt=attempt,
+                outcome="skipped", code="source_version_changed",
+                derived_set=None, now=final_now,
+            )
+            await session.commit()
+            return item.id
+        if not is_pre_acl_retrieval_eligible(
+            organization, document, version, final_now
+        ):
+            await build_savepoint.rollback()
+            await _succeed(
+                session, item=item, job=job, attempt=attempt,
+                outcome="skipped", code="document_not_eligible",
+                derived_set=None, now=final_now,
+            )
+            await session.commit()
+            return item.id
+        if (
+            configuration is None
+            or configuration.status != "active"
+            or configuration.full_text_configuration != ft_config
+        ):
+            await build_savepoint.rollback()
+            await _succeed(
+                session, item=item, job=job, attempt=attempt,
+                outcome="skipped", code="configuration_not_applicable",
+                derived_set=None, now=final_now,
+            )
+            await session.commit()
+            return item.id
+        active_set = await session.scalar(
+            select(DerivedSet)
+            .where(
+                DerivedSet.organization_id == claim.organization_id,
+                DerivedSet.document_version_id == claim.source_document_version_id,
+                DerivedSet.configuration_id == claim.configuration_id,
+                DerivedSet.status == "ready",
+                DerivedSet.is_active.is_(True),
+            )
+            .with_for_update()
+        )
+        if active_set is not None:
+            await build_savepoint.rollback()
+            await _succeed(
+                session, item=item, job=job, attempt=attempt,
+                outcome="skipped", code="already_current",
+                derived_set=None, now=final_now,
+            )
+            await session.commit()
+            return item.id
+        await build_savepoint.commit()
+
+        stage = "full_text_activate"
+        if await _all_required_derived_components_present(
+            session,
+            organization_id=claim.organization_id,
+            derived_set_id=source_set.id,
+            configuration=configuration,
+        ):
+            result_set = await activate_derived_set(
+                session,
+                organization_id=claim.organization_id,
+                derived_set_id=source_set.id,
+            )
+        else:
+            result_set = source_set
+        await _succeed(
+            session, item=item, job=job, attempt=attempt,
+            outcome="rebuilt", code=None, derived_set=result_set, now=final_now,
         )
         await session.commit()
         return item.id

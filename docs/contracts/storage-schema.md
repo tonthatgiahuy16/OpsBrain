@@ -703,6 +703,58 @@ Required constraints:
 
 Pgvector index type, distance operator và dimension cố định cho migration được chốt ở retrieval milestone. Việc chưa chốt tuning không làm thay đổi yêu cầu provenance hoặc rebuildability.
 
+### 10.4.1 `chunk_full_text_indexes` — Milestone 6 contract
+
+Full-text index là derived data theo chunk, được build sau khi `chunks` đã
+immutable. Vì vậy không được thêm hay cập nhật `tsvector` trực tiếp trên
+`chunks`; mọi output full-text thuộc bảng riêng dưới cùng `derived_set`.
+
+| Column | Type | Constraint | Meaning |
+|---|---|---|---|
+| `id` | `uuid` | Primary key | Internal derived-index key |
+| `organization_id` | `uuid` | Not null | Organization scope |
+| `derived_set_id` | `uuid` | Not null | Derived set sở hữu index |
+| `chunk_id` | `uuid` | Not null | Chunk được indexed |
+| `document_pk` | `uuid` | Not null | Source document identity |
+| `document_version_id` | `uuid` | Not null | Exact source version for citation |
+| `full_text_configuration` | `text` | Not null, value `english` ở M6 | PostgreSQL text-search configuration đã chốt |
+| `input_hash` | `text` | Not null, SHA-256 lowercase | Hash của exact normalized `chunks.content` |
+| `search_vector` | `tsvector` | Not null | PostgreSQL full-text derived vector |
+| `created_at` | `timestamptz` | Not null | Thời điểm build |
+
+Required constraints and indexes:
+
+- `UNIQUE (organization_id, derived_set_id, chunk_id)`.
+- Composite foreign key tới `derived_sets`, `chunks` và source `document_versions`
+  phải chứng minh mọi row cùng organization, derived set, document và version.
+- `document_pk` và `document_version_id` phải khớp provenance của `chunk_id`;
+  `derived_set_id` phải là set sở hữu chính chunk đó.
+- `input_hash` là SHA-256 của exact input mà worker dùng để tạo `search_vector`.
+  M6 dùng `normalize_markdown_body(chunks.content)` mã hóa UTF-8; không index
+  title, frontmatter, ACL hay raw document body ngoài chunk content.
+- `full_text_configuration` là allowlist, không được ghép trực tiếp từ input
+  client vào SQL. M6 chỉ hỗ trợ `english`, tương ứng corpus baseline hiện tại.
+  Mở rộng language/configuration là semantic contract change và phải tạo
+  derived set mới.
+- Full-text rows immutable sau persist. Thay đổi content, chunking hoặc
+  full-text configuration phải tạo derived set mới; worker không `UPDATE`
+  `chunks` hay full-text row cũ.
+- Tạo GIN index trên `search_vector` và B-tree index phục vụ lookup theo
+  `(organization_id, derived_set_id, chunk_id)`.
+- Nếu bảng mới mang organization-scoped data, RLS, application/worker
+  privileges và direct-database tests phải được mở rộng cùng migration.
+
+Activation và rebuild rules:
+
+- Khi `DerivedConfiguration.full_text_configuration` khác `null`, một derived
+  set chỉ được activation nếu mỗi chunk có đúng một full-text row đúng config,
+  song song với điều kiện embeddings hiện có.
+- Rebuild/replay cùng source version và configuration trả lại row logic tương
+  đương, không tạo duplicate. Failure hoặc stale worker phải rollback output
+  theo cùng fencing/lease protocol của reindex worker.
+- `full_text` là reindex target Milestone 6. Target này không được nhận bởi
+  runtime trước khi worker, lease/fencing và activation checks có Evidence.
+
 ### 10.5 Document index-state mapping
 
 API `index_status` của current document được tính như sau:

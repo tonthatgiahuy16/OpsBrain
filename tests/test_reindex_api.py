@@ -441,7 +441,7 @@ async def test_get_job_filters_items_by_acl_and_enforces_index_read(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "targets",
-    [["full_text"], ["relationships"], ["chunks", "embeddings"]],
+    [["relationships"], ["chunks", "embeddings"]],
 )
 async def test_unsupported_and_multi_targets_return_422(
     migration_database_engine,
@@ -469,6 +469,38 @@ async def test_unsupported_and_multi_targets_return_422(
 
             assert response.status_code == 422
             assert response.json()["error"]["code"] == "invalid_target"
+        finally:
+            app.dependency_overrides.clear()
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_full_text_target_is_accepted_202(migration_database_engine):
+    async with migration_database_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(
+            bind=connection,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            principals, _, _ = await _seed_reindex_context(session)
+            _configure_endpoint(session, principal=principals["admin"])
+
+            response = await _post_reindex(
+                payload={
+                    "scope": {"type": "organization"},
+                    "targets": ["full_text"],
+                    "reason": "rebuild full text",
+                },
+                idempotency_key=f"ft-{uuid4()}",
+            )
+
+            assert response.status_code == 202
+            body = response.json()
+            assert body["targets"] == ["full_text"]
+            assert body["status"] == "queued"
         finally:
             app.dependency_overrides.clear()
             await session.close()
