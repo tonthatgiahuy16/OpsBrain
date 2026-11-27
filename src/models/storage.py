@@ -14,7 +14,7 @@ from sqlalchemy import (
     Integer,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID as PGUUID
 from pgvector.sqlalchemy import Vector
 
 from src.database import Base
@@ -1613,5 +1613,69 @@ class ChunkEmbedding(Base):
         CheckConstraint(
             "vector_dims(embedding) = embedding_dimensions",
             name="embedding_dimensions_match_vector",
+        ),
+    )
+
+
+class ChunkFullTextIndex(Base):
+    __tablename__ = "chunk_full_text_indexes"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PGUUID(as_uuid=True), nullable=False)
+    derived_set_id = Column(PGUUID(as_uuid=True), nullable=False)
+    chunk_id = Column(PGUUID(as_uuid=True), nullable=False)
+    document_pk = Column(PGUUID(as_uuid=True), nullable=False)
+    document_version_id = Column(PGUUID(as_uuid=True), nullable=False)
+    full_text_configuration = Column(Text, nullable=False)
+    input_hash = Column(Text, nullable=False)
+    search_vector = Column(TSVECTOR(), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "derived_set_id", "chunk_id"),
+        ForeignKeyConstraint(
+            ["organization_id", "derived_set_id"],
+            ["derived_sets.organization_id", "derived_sets.id"],
+            name="fk_chunk_full_text_indexes_derived_set",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "derived_set_id", "chunk_id"],
+            ["chunks.organization_id", "chunks.derived_set_id", "chunks.id"],
+            name="fk_chunk_full_text_indexes_chunk",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "document_pk", "document_version_id"],
+            [
+                "document_versions.organization_id",
+                "document_versions.document_pk",
+                "document_versions.id",
+            ],
+            name="fk_chunk_full_text_indexes_document_version",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "full_text_configuration = 'english'",
+            name="full_text_configuration_allowed",
+        ),
+        CheckConstraint(
+            "input_hash ~ '^[0-9a-f]{64}$'",
+            name="input_hash_sha256_hex",
+        ),
+        Index(
+            "ix_chunk_full_text_indexes_lookup",
+            "organization_id",
+            "derived_set_id",
+            "chunk_id",
+        ),
+        Index(
+            "ix_chunk_full_text_indexes_search_vector",
+            "search_vector",
+            postgresql_using="gin",
         ),
     )

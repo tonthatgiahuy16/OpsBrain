@@ -160,7 +160,7 @@ async def create_reindex_job(
         await session.commit()
         raise HTTPException(status.HTTP_403_FORBIDDEN, "reindex_forbidden")
 
-    if request.targets not in (["chunks"], ["embeddings"]):
+    if request.targets not in (["chunks"], ["embeddings"], ["full_text"]):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_target")
 
     if not idempotency_key or not idempotency_key.strip():
