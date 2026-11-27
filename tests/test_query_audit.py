@@ -64,7 +64,7 @@ async def test_evidence_returned_writes_one_audit_event_without_content(
             assert event.document_version_id is None
 
             details = event.details
-            assert details["strategy"] == "vector"
+            assert details["strategy"] == "hybrid"
             assert details["response_mode"] == "evidence_only"
             assert details["top_k"] == 5
             assert details["retrieval_config_id"] == body["configuration"]["retrieval_config_id"]

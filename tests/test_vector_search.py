@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.ingestion.derived_activation import activate_derived_set
 from src.ingestion.embedding_build import persist_chunk_embeddings
+from src.ingestion.full_text_build import persist_chunk_full_text_indexes
 from src.models.storage import Chunk, ChunkEmbedding
 from src.retrieval.vector_search import (
     EmbeddingProfile,
@@ -43,6 +44,7 @@ async def _seed_embedded_document(
     embedding_model_revision: str | None = None,
     embedding_dimensions: int = 384,
     vector_for_chunk: Callable[[Chunk], list[float]] | None = None,
+    full_text_configuration: str | None = "english",
 ):
     (
         organization_id,
@@ -55,6 +57,7 @@ async def _seed_embedded_document(
         embedding_model=embedding_model,
         embedding_model_revision=embedding_model_revision,
         embedding_dimensions=embedding_dimensions,
+        full_text_configuration=full_text_configuration,
         organization_id=organization_id,
         source_document=source_document,
     )
@@ -79,6 +82,12 @@ async def _seed_embedded_document(
             for chunk in chunks
         },
     )
+    if full_text_configuration is not None:
+        await persist_chunk_full_text_indexes(
+            session,
+            organization_id=organization_id,
+            derived_set_id=derived_set.id,
+        )
     await activate_derived_set(
         session,
         organization_id=organization_id,

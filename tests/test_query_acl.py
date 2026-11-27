@@ -11,6 +11,7 @@ from src.api.queries import AuthenticatedPrincipal, get_authenticated_principal
 from src.authorization.acl import resolve_readable_document_pks
 from src.database import get_db
 from src.models.storage import (
+    AuditEvent,
     DocumentVersionAclEntry,
     Organization,
     Principal,
@@ -167,9 +168,19 @@ async def test_query_endpoint_never_cites_restricted_document_without_active_gra
                 response = await client.post("/api/v1/queries", json={"question": "restricted evidence", "top_k": 5})
             assert response.status_code == 200
             body = response.json()
+            assert body["strategy_used"] == "hybrid"
             assert body["abstained"] is False
             assert {item["document_id"] for item in body["evidence"]} == {"restricted-allowed"}
+            assert all(item["scores"]["rrf"] is not None for item in body["evidence"])
             assert str(blocked["document_pk"]) not in str(body)
+            audit = await session.scalar(
+                select(AuditEvent).where(
+                    AuditEvent.organization_id == allowed["organization_id"],
+                    AuditEvent.event_type == "query.executed",
+                )
+            )
+            assert audit is not None
+            assert str(blocked["document_pk"]) not in str(audit.details)
 
             membership = await session.scalar(
                 select(PrincipalRoleMembership).where(

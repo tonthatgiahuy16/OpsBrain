@@ -415,7 +415,7 @@ async def test_evidence_window_expired_between_ranking_and_citation_abstains(
             _invalidate_after_ranking(
                 monkeypatch,
                 values={
-                    "effective_until": datetime.now(timezone.utc) - timedelta(seconds=1)
+                    "effective_until": datetime.now(timezone.utc) - timedelta(minutes=5)
                 },
                 seen=ranked,
             )

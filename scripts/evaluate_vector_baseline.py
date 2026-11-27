@@ -1,4 +1,4 @@
-"""Run a gold dataset through the minimal vector-evidence endpoint."""
+"""Run a fixed retrieval strategy through the minimal evidence endpoint."""
 
 import argparse
 import asyncio
@@ -225,6 +225,7 @@ async def _run_evaluation(args: argparse.Namespace) -> None:
                 json={
                     "question": case["question"],
                     "response_mode": "evidence_only",
+                    "strategy": args.strategy,
                     "top_k": args.top_k,
                 },
             )
@@ -244,7 +245,7 @@ async def _run_evaluation(args: argparse.Namespace) -> None:
     output = {
         "run_at": datetime.now(timezone.utc).isoformat(),
         "dataset_version": args.dataset_version,
-        "strategy": "vector",
+        "strategy": args.strategy,
         "response_mode": "evidence_only",
         "top_k": args.top_k,
         "cases": results,
@@ -273,6 +274,12 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument(
+        "--strategy",
+        choices=("vector", "hybrid"),
+        default="vector",
+        help="Fixed retrieval strategy; never compare runs with implicit auto selection.",
+    )
     return parser.parse_args()
 
 
