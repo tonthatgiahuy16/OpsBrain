@@ -41,6 +41,7 @@ async def _seed_activation_inputs(
     embedding_model: str | None = None,
     embedding_model_revision: str | None = None,
     embedding_dimensions: int | None = None,
+    full_text_configuration: str | None = None,
     organization_id: UUID | None = None,
     source_document: Path = SAMPLE_DOCUMENT,
 ):
@@ -141,6 +142,7 @@ async def _seed_activation_inputs(
             if embedding_dimensions is not None
             else (384 if embedding_model else None)
         ),
+        full_text_configuration=full_text_configuration,
         configuration_payload={"max_characters": 1200},
         configuration_hash="a" * 64,
         status="active",

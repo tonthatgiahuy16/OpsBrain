@@ -32,6 +32,8 @@ from src.models.storage import (
     Organization,
 )
 from src.retrieval.vector_search import EmbeddingProfile, active_embedding_profiles, vector_top_k
+from src.retrieval.full_text_search import full_text_top_k
+from src.retrieval.hybrid import reciprocal_rank_fusion
 
 
 router = APIRouter(prefix="/api/v1", tags=["Queries"])
@@ -185,11 +187,24 @@ def _configuration_payload(configuration: DerivedConfiguration) -> dict[str, obj
 
 
 QUERY_CAPABILITY = "query:execute"
+ACTIVE_DOCUMENT_VECTOR_BOOST = 0.05
+ACTIVE_DOCUMENT_HYBRID_BOOST = 0.002
 
 
 def _latency_payload(started: float) -> dict[str, int | None]:
     elapsed = int((perf_counter() - started) * 1_000)
     return {"retrieval": elapsed, "generation": None, "total": elapsed}
+
+
+def _resolve_strategy(
+    requested: Literal["auto", "vector", "hybrid", "hybrid_graph"],
+    *,
+    full_text_configuration: str | None,
+) -> Literal["vector", "hybrid", "hybrid_graph"]:
+    """Choose auto from available derived components without silent fallback."""
+    if requested == "auto":
+        return "hybrid" if full_text_configuration == "english" else "vector"
+    return requested
 
 
 async def _record_query_audit(
@@ -268,7 +283,7 @@ async def execute_query(
             details={"required_capability": QUERY_CAPABILITY},
         )
         raise HTTPException(status.HTTP_403_FORBIDDEN, "query_forbidden")
-    if request.effective_strategy in ("hybrid", "hybrid_graph"):
+    if request.effective_strategy == "hybrid_graph":
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "unsupported_retrieval_strategy",
@@ -277,6 +292,15 @@ async def execute_query(
         raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "generation_not_implemented")
     started = perf_counter()
     configuration = await _active_configuration(session, principal.organization_id)
+    strategy_used = _resolve_strategy(
+        request.effective_strategy,
+        full_text_configuration=configuration.full_text_configuration,
+    )
+    if (
+        strategy_used == "hybrid"
+        and configuration.full_text_configuration != "english"
+    ):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "retrieval_unavailable")
     allowed_document_pks = await resolve_readable_document_pks(
         session,
         organization_id=principal.organization_id,
@@ -312,6 +336,7 @@ async def execute_query(
         return await _abstain(
             session, principal=principal, request_id=request_id,
             request=request, configuration=configuration, started=started,
+            strategy_used=strategy_used,
         )
     try:
         client = await get_embedding_client(configuration)
@@ -320,7 +345,7 @@ async def execute_query(
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "embedding_unavailable")
     candidate_k = (
         min(max(request.effective_top_k * 4, 20), 50)
-        if active_document_pk is not None
+        if active_document_pk is not None or strategy_used == "hybrid"
         else request.effective_top_k
     )
     hits = await vector_top_k(
@@ -332,20 +357,31 @@ async def execute_query(
         embedding_model_revision=configuration.embedding_model_revision,
         top_k=candidate_k,
     )
-    if not hits:
+    if not hits and strategy_used == "vector":
         return await _abstain(
             session, principal=principal, request_id=request_id,
             request=request, configuration=configuration, started=started,
+            strategy_used=strategy_used,
         )
     hits = [
         hit for hit in hits
         if hit.score >= get_settings().QUERY_MIN_VECTOR_SCORE
     ]
-    if not hits:
+    if not hits and strategy_used == "vector":
         return await _abstain(
             session, principal=principal, request_id=request_id,
             request=request, configuration=configuration, started=started,
-            reason="insufficient_evidence",
+            reason="insufficient_evidence", strategy_used=strategy_used,
+        )
+    full_text_hits = []
+    if strategy_used == "hybrid":
+        full_text_hits = await full_text_top_k(
+            session,
+            organization_id=principal.organization_id,
+            allowed_document_pks=allowed_document_pks,
+            question=request.question,
+            full_text_configuration=configuration.full_text_configuration,
+            top_k=candidate_k,
         )
     # Re-resolve after the external embedding call. The window between the
     # first authorization decision and citation construction must not keep
@@ -356,19 +392,40 @@ async def execute_query(
         principal_id=principal.id,
     )
     hits = [hit for hit in hits if hit.document_pk in allowed_document_pks]
-    if not hits:
+    full_text_hits = [
+        hit for hit in full_text_hits if hit.document_pk in allowed_document_pks
+    ]
+    if not hits and not full_text_hits:
         return await _abstain(
             session, principal=principal, request_id=request_id,
             request=request, configuration=configuration, started=started,
+            strategy_used=strategy_used, reason="insufficient_evidence",
+        )
+    if strategy_used == "hybrid":
+        hits = reciprocal_rank_fusion(
+            vector_hits=hits,
+            full_text_hits=full_text_hits,
+            top_k=candidate_k,
         )
     if active_document_pk is not None:
         # Apply a bounded priority boost to the active document only after ACL
         # and minimum-score gates, keeping reported vector scores unmutated.
         hits = sorted(
             hits,
-            key=lambda hit: hit.score
-            + (0.05 if hit.document_pk == active_document_pk else 0.0),
-            reverse=True,
+            key=lambda hit: (
+                -(
+                    (hit.rrf_score if strategy_used == "hybrid" else hit.score)
+                    + (
+                        (
+                            ACTIVE_DOCUMENT_HYBRID_BOOST
+                            if strategy_used == "hybrid"
+                            else ACTIVE_DOCUMENT_VECTOR_BOOST
+                        )
+                        if hit.document_pk == active_document_pk else 0.0
+                    )
+                ),
+                str(hit.chunk_id),
+            ),
         )
     hits = hits[: request.effective_top_k]
     evidence = []
@@ -417,7 +474,15 @@ async def execute_query(
             "title": version.title,
             "source_uri": version.source_uri,
             "excerpt": chunk.content[:500],
-            "scores": {"vector": hit.score, "full_text": None, "rrf": None},
+            "scores": {
+                "vector": (
+                    hit.vector_score if strategy_used == "hybrid" else hit.score
+                ),
+                "full_text": (
+                    hit.full_text_score if strategy_used == "hybrid" else None
+                ),
+                "rrf": hit.rrf_score if strategy_used == "hybrid" else None,
+            },
             "relationship_path": [],
         })
         # Audit only identifiers and scores of evidence that is already in the
@@ -425,12 +490,19 @@ async def execute_query(
         audit_evidence.append({
             "chunk_id": str(chunk.id),
             "document_version_id": str(version.id),
-            "vector_score": round(float(hit.score), 6),
+            "vector_score": round(float(
+                hit.vector_score if strategy_used == "hybrid" else hit.score
+            ), 6) if (hit.vector_score if strategy_used == "hybrid" else hit.score) is not None else None,
+            "full_text_score": round(float(hit.full_text_score), 6)
+            if strategy_used == "hybrid" and hit.full_text_score is not None else None,
+            "rrf_score": round(float(hit.rrf_score), 6)
+            if strategy_used == "hybrid" else None,
         })
     if not evidence:
         return await _abstain(
             session, principal=principal, request_id=request_id,
             request=request, configuration=configuration, started=started,
+            strategy_used=strategy_used,
         )
     latency = _latency_payload(started)
     await _record_query_audit(
@@ -440,7 +512,7 @@ async def execute_query(
         event_type="query.executed",
         outcome="succeeded",
         details={
-            "strategy": "vector",
+            "strategy": strategy_used,
             "response_mode": request.response_mode,
             "top_k": request.effective_top_k,
             "retrieval_config_id": configuration.configuration_key,
@@ -454,7 +526,7 @@ async def execute_query(
         "request_id": request_id,
         "query_id": str(uuid4()),
         "status": "evidence_returned",
-        "strategy_used": "vector",
+        "strategy_used": strategy_used,
         "response_mode": request.response_mode,
         "answer": None,
         "abstained": False,
@@ -473,6 +545,7 @@ async def _abstain(
     request: RetrievalRequest,
     configuration: DerivedConfiguration,
     started: float,
+    strategy_used: str,
     reason: str = "no_eligible_evidence",
 ) -> dict[str, object]:
     """Return a controlled refusal and audit it as a handled outcome.
@@ -490,7 +563,7 @@ async def _abstain(
         outcome="succeeded",
         reason_code=reason,
         details={
-            "strategy": "vector",
+            "strategy": strategy_used,
             "response_mode": request.response_mode,
             "top_k": request.effective_top_k,
             "retrieval_config_id": configuration.configuration_key,
@@ -504,7 +577,7 @@ async def _abstain(
         "request_id": request_id,
         "query_id": str(uuid4()),
         "status": "abstained",
-        "strategy_used": "vector",
+        "strategy_used": strategy_used,
         "response_mode": request.response_mode,
         "answer": None,
         "abstained": True,

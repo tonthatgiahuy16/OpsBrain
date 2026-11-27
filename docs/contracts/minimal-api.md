@@ -531,7 +531,10 @@ Request body:
 - `strategy: vector` giữ nguyên baseline vector-only để so sánh; `strategy:
   hybrid` chạy vector và PostgreSQL full-text trên cùng tập candidate đã qua
   organization, lifecycle, review, temporal validity, active-derived-set và
-  ACL filtering. `strategy: auto` dùng `hybrid` sau khi M6 được triển khai.
+  ACL filtering. `strategy: auto` chọn `hybrid` khi active configuration bật
+  `full_text_configuration` (hiện tại là `english`) và chọn `vector` khi
+  `full_text_configuration` là `null`; gọi tường minh `strategy: hybrid` khi
+  configuration chưa bật full-text trả `503 retrieval_unavailable`.
   `hybrid_graph` vẫn trả `422 unsupported_retrieval_strategy` cho đến M7.
 - Public API M6 không thêm `full_text` strategy độc lập. Full-text source tồn
   tại để phục vụ hybrid và evaluation, không được âm thầm fallback từ hybrid

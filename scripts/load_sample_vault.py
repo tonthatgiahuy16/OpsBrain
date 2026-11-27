@@ -110,8 +110,19 @@ async def _grant_reviewer_capability(
     await session.flush()
 
 
-async def _configuration(session, *, organization_id: UUID, principal_id: UUID, dimensions: int):
-    key = "sample-vault-nomic-embed-text-v1"
+async def _configuration(
+    session,
+    *,
+    organization_id: UUID,
+    principal_id: UUID,
+    dimensions: int,
+    full_text_configuration: str | None = None,
+):
+    key = (
+        "sample-vault-nomic-embed-text-ft-v1"
+        if full_text_configuration is not None
+        else "sample-vault-nomic-embed-text-v1"
+    )
     configuration = await session.scalar(select(DerivedConfiguration).where(
         DerivedConfiguration.organization_id == organization_id,
         DerivedConfiguration.configuration_key == key,
@@ -121,7 +132,9 @@ async def _configuration(session, *, organization_id: UUID, principal_id: UUID, 
         configuration = DerivedConfiguration(
             id=uuid4(), organization_id=organization_id, configuration_key=key,
             chunking_version=CHUNKING_VERSION, embedding_model="nomic-embed-text",
-            embedding_dimensions=dimensions, configuration_payload=payload,
+            embedding_dimensions=dimensions,
+            full_text_configuration=full_text_configuration,
+            configuration_payload=payload,
             configuration_hash=sha256(repr(sorted(payload.items())).encode()).hexdigest(),
             status="active", created_by_principal_id=principal_id,
         )
@@ -130,14 +143,17 @@ async def _configuration(session, *, organization_id: UUID, principal_id: UUID, 
     elif (
         configuration.embedding_model != "nomic-embed-text"
         or configuration.embedding_dimensions != dimensions
+        or configuration.full_text_configuration != full_text_configuration
     ):
         raise ValueError(
-            "sample-vault configuration conflicts with requested embedding model or dimensions"
+            "sample-vault configuration conflicts with requested embedding model, dimensions, or full_text_configuration"
         )
     return configuration
 
 
-async def load_sample_vault(*, dimensions: int) -> int:
+async def load_sample_vault(
+    *, dimensions: int, full_text_configuration: str | None = None,
+) -> int:
     notes = sorted(VAULT_ROOT.rglob("*.md"))
     if len(notes) != 12:
         raise RuntimeError(f"expected 12 sample notes, found {len(notes)}")
@@ -150,6 +166,7 @@ async def load_sample_vault(*, dimensions: int) -> int:
         configuration = await _configuration(
             session, organization_id=organization.id, principal_id=author.id,
             dimensions=dimensions,
+            full_text_configuration=full_text_configuration,
         )
         queued = 0
         for path in notes:
@@ -183,10 +200,20 @@ async def load_sample_vault(*, dimensions: int) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dimensions", type=int, default=768)
+    parser.add_argument(
+        "--full-text-configuration",
+        choices=("english",),
+        default=None,
+    )
     args = parser.parse_args()
     if args.dimensions < 1:
         parser.error("--dimensions must be positive")
-    asyncio.run(load_sample_vault(dimensions=args.dimensions))
+    asyncio.run(
+        load_sample_vault(
+            dimensions=args.dimensions,
+            full_text_configuration=args.full_text_configuration,
+        )
+    )
 
 
 if __name__ == "__main__":
